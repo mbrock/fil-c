@@ -14014,6 +14014,37 @@ class Pizlonator {
       }
       
       TheCall->setDebugLoc(CI->getDebugLoc());
+
+      // Preserve guaranteed tail calls, which coroutine symmetric transfer relies on to avoid
+      // unbounded stack growth. The caller and callee had matching prototypes, so their lowered
+      // functions return the same (has_exception, value) aggregate, and the caller can hand the
+      // callee's result straight back to its own caller after popping its Fil-C frame.
+      if (isa<CallInst>(CI) && cast<CallInst>(CI)->isMustTailCall()
+          && TheCall->getType() == NewF->getReturnType()) {
+        new StoreInst(
+          new LoadInst(
+            RawPtrTy,
+            GetElementPtrInst::Create(
+              FrameTy, Frame, { ConstantInt::get(Int32Ty, 0), ConstantInt::get(Int32Ty, 0) },
+              "filc_frame_parent_ptr", TheCall),
+            "filc_frame_parent", TheCall),
+          threadTopFramePtr(MyThread, TheCall),
+          TheCall);
+        TheCall->setTailCallKind(CallInst::TCK_MustTail);
+        BasicBlock* CallBB = TheCall->getParent();
+        // The original ret after CI is now dead; it still gets lowered, so leave it valid.
+        SplitBlock(CallBB, CI);
+        ReplaceInstWithInst(CallBB->getTerminator(), ReturnInst::Create(C, TheCall));
+        if (FT->getReturnType() != VoidTy) {
+          LoadInst* LI = new LoadInst(
+            toFlightType(FT->getReturnType()), RawNull, "filc_dead_musttail_result", CI);
+          LI->setDebugLoc(CI->getDebugLoc());
+          CI->replaceAllUsesWith(LI);
+        }
+        CI->eraseFromParent();
+        return;
+      }
+
       Instruction* HasException = ExtractValueInst::Create(
         Int1Ty, TheCall, { 0 }, "filc_has_exception", CI);
       HasException->setDebugLoc(CI->getDebugLoc());
