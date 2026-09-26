@@ -47,10 +47,13 @@ extern "C" {
 int zsys_ioctl(int fd, int request, ...);
 long zsys_writev(int fd, const void* iov, int iovcnt);
 long zsys_read(int fd, void* buf, __SIZE_TYPE__ size);
+long zsys_read_cancel(int fd, void* buf, __SIZE_TYPE__ size, int* canceled);
 long zsys_readv(int fd, const void* iov, int iovcnt);
 long zsys_write(int fd, const void* buf, __SIZE_TYPE__ size);
 int zsys_close_impl(int fd);
 int zsys_close(int fd);
+int zsys_close_cancel_impl(int fd, int* canceled);
+int zsys_close_cancel(int fd, int* canceled);
 long zsys_lseek(int fd, long offset, int whence);
 void zsys_exit_soft(int return_code); /* Uses the yolo exit(3), so calls destructors. */
 void zsys_exit_hard(int return_code); /* Uses the yolo _Exit(2), so no destructors. */
@@ -85,6 +88,7 @@ unsigned zsys_umask(unsigned mask);
 int zsys_getitimer(int which, void* curr_value);
 int zsys_setitimer(int which, const void* new_value, void* old_value);
 int zsys_pause(void);
+int zsys_pause_cancel(int* canceled);
 int zsys_pselect(int nfds, void* readfds, void* writefds, void* exceptfds, const void* timeout,
                  const void* sigmask);
 int zsys_kill(int pid, int sig);
@@ -134,6 +138,7 @@ void* zsys_dlsym(void* handle, const char* symbol);
 void* zsys_dlvsym(void* handle, const char* symbol, const char* version);
 int zsys_dladdr(const void* addr, void* info);
 int zsys_poll(void* pollfds, unsigned long nfds, int timeout);
+int zsys_poll_cancel(void* pollfds, unsigned long nfds, int timeout, int* canceled);
 int zsys_faccessat(int dirfd, const char* pathname, int mode, int flags);
 int zsys_sigwait(const void* sigmask, int* sig);
 int zsys_fsync(int fd);
@@ -229,6 +234,8 @@ void zsys_futex_wait(volatile int* addr, int val, int priv);
    uses! */
 int zsys_futex_timedwait(volatile int* addr, int val, int clock_id, const void* absolute_timeout,
                          int priv);
+int zsys_futex_timedwait_cancel(volatile int* addr, int val, int clock_id,
+                                const void* absolute_timeout, int priv, int* canceled);
 int zsys_futex_unlock_pi(volatile int* addr, int priv);
 int zsys_futex_lock_pi(volatile int* addr, int priv, const void* timeout);
 void zsys_futex_requeue(volatile int* addr, int priv, int wake_count, int requeue_count,
@@ -237,6 +244,7 @@ int zsys_getdents(int fd, void* dirent, __SIZE_TYPE__ size);
 long zsys_getrandom(void* buf, __SIZE_TYPE__ buflen, unsigned flags);
 int zsys_epoll_create1_impl(int flags);
 int zsys_epoll_ctl_impl(int epfd, int op, int fd, void* event);
+int zsys_epoll_wait_cancel(int epfd, void* events, int maxevents, int timeout, int* canceled);
 int zsys_epoll_wait_impl(int epfd, void* events, int maxevents, int timeout);
 int zsys_epoll_pwait_impl(int epfd, void* events, int maxevents, int timeout, const void* sigmask);
 int zsys_epoll_pwait2_impl(int epfd, void* events, int maxevents, const void* timeout,
@@ -411,6 +419,19 @@ long zsys_set_mempolicy(int mode, const unsigned long *nodemask,
                         unsigned long maxnode);
 int zsys_clock_adjtime(int clock_id, void* buf);
 void zsys_abort(void);
+
+/* Cancellation variants return a separate outcome after native result conversion. */
+long zsys_write_cancel(int fd, const void* buf, __SIZE_TYPE__ size, int* canceled_ptr);
+long zsys_readv_cancel(int fd, const void* iov_ptr, int count, int* canceled_ptr);
+long zsys_writev_cancel(int fd, const void* iov_ptr, int count, int* canceled_ptr);
+long zsys_pread_cancel(int fd, void* buf, __SIZE_TYPE__ size, long offset, int* canceled_ptr);
+long zsys_pwrite_cancel(int fd, const void* buf, __SIZE_TYPE__ size, long offset, int* canceled_ptr);
+int zsys_openat_cancel(int fd, const char* path_ptr, int flags, unsigned mode, int* canceled_ptr);
+int zsys_accept4_cancel(int fd, void* addr_ptr, unsigned* addrlen_ptr, int flags, int* canceled_ptr);
+long zsys_sendmsg_cancel(int fd, const void* msg_ptr, int flags, int* canceled_ptr);
+long zsys_recvmsg_cancel(int fd, void* msg_ptr, int flags, int* canceled_ptr);
+int zsys_clock_nanosleep_cancel(int clockid, int flags, const void* req_ptr, void* rem_ptr, int* canceled_ptr);
+int zsys_epoll_wait_cancel_impl(int fd, void* events_ptr, int maxevents, int timeout, int* canceled_ptr);
 
 #ifdef __cplusplus
 }

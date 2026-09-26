@@ -21,6 +21,7 @@
 #include <time.h>
 #include <futex-internal.h>
 #include <kernel-features.h>
+#include <pthreadP.h>
 
 int
 __futex_abstimed_wait64 (unsigned int* futex_word, unsigned int expected,
@@ -38,8 +39,14 @@ __futex_abstimed_wait_cancelable64 (unsigned int* futex_word,
                                     const struct __timespec64* abstime,
                                     int private)
 {
-  return __futex_abstimed_wait64 (futex_word, expected, clockid, abstime,
-                                  private);
+  __pthread_testcancel ();
+  int canceled;
+  int result = zsys_futex_timedwait_cancel (
+    (volatile int *) futex_word, expected, clockid, abstime,
+    __lll_zsys_private_arg (private), &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 libc_hidden_def (__futex_abstimed_wait_cancelable64)
 

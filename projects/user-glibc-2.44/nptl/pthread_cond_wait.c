@@ -330,6 +330,9 @@ static __always_inline int
 __pthread_cond_wait_common (pthread_cond_t *cond, pthread_mutex_t *mutex,
     clockid_t clockid, const struct __timespec64 *abstime)
 {
+  /* A request already pending on entry must also cancel the fast path.
+     The caller still owns MUTEX here, as cancellation cleanup requires. */
+  __pthread_testcancel ();
   int err;
   int result = 0;
 

@@ -61,7 +61,18 @@ unwind_stop (int version, _Unwind_Action actions,
 				    adj))
     do_longjump = 1;
 
-  ZASSERT(!curp);
+  /* The compatibility list is still used by NPTL waits and libc locks.
+     Compare call-frame identities, not heap addresses of cleanup buffers.
+     The modern cleanup scope's saved list head is the nesting boundary. */
+  void *frame = (void *) (_Unwind_Ptr) _Unwind_GetCFA (context);
+  while (curp != NULL && curp != buf->priv.data.cleanup
+         && (do_longjump || curp->__filc_frame == frame))
+    {
+      struct _pthread_cleanup_buffer *next = curp->__prev;
+      THREAD_SETMEM (self, cleanup, next);
+      curp->__routine (curp->__arg);
+      curp = THREAD_GETMEM (self, cleanup);
+    }
 
   DIAG_PUSH_NEEDS_COMMENT;
 #if __GNUC_PREREQ (7, 0)

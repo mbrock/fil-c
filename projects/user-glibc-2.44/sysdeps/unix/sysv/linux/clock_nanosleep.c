@@ -24,6 +24,7 @@
 
 #include <shlib-compat.h>
 #include <pizlonated_syscalls.h>
+#include <pthreadP.h>
 
 /* We can simply use the syscall.  The CPU clocks are not supported
    with this function.  */
@@ -32,7 +33,12 @@ __clock_nanosleep_time64 (clockid_t clock_id, int flags,
 			  const struct __timespec64 *req,
 			  struct __timespec64 *rem)
 {
-  return zsys_clock_nanosleep (clock_id, flags, req, rem);
+  __pthread_testcancel ();
+  int canceled;
+  int result = zsys_clock_nanosleep_cancel (clock_id, flags, req, rem, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 
 #if __TIMESIZE != 64

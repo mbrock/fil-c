@@ -687,6 +687,11 @@ typedef struct zjmp_buf zjmp_buf;
    that has no capability (it might as well be an integer). */
 void* zget_jmp_buf_impl_frame(zjmp_buf* jmp_buf_impl);
 
+/* Return an identity for a call frame: depth 0 is the caller, depth 1 its
+   caller, etc. The returned pointer cannot be dereferenced. Like the frame
+   of a jump buffer, it is only meaningful while that frame remains live. */
+void* zget_call_frame(unsigned depth);
+
 /* Given a jmp_buf, return the frame that it jumps to. This is the __builtin_frame_address() or
    _Unwind_GetCFA() value for that frame. Note that this is a pointer that has no capability (it might
    as well be an integer).

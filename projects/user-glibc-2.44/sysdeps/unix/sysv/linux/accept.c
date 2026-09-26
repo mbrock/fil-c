@@ -19,11 +19,17 @@
 #include <sysdep-cancel.h>
 #include <socketcall.h>
 #include <pizlonated_syscalls.h>
+#include <pthreadP.h>
 
 int
 __libc_accept (int fd, __SOCKADDR_ARG addr, socklen_t *len)
 {
-  return zsys_accept (fd, addr.__sockaddr__, len);
+  __pthread_testcancel ();
+  int canceled;
+  int result = zsys_accept4_cancel (fd, addr.__sockaddr__, len, 0, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 static_weak_alias (__libc_accept, accept)
 libc_hidden_def (accept)

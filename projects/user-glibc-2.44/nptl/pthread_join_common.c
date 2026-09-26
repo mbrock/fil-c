@@ -65,7 +65,7 @@ __pthread_clockjoin_ex (pthread_t threadid, void **thread_return,
 
   struct pthread *self = THREAD_SELF;
   if (pd == self
-      && !cancel_enabled_and_canceled (self->cancelhandling))
+      && !cancel_enabled_and_canceled (zthread_cancel_get ()))
     return EDEADLK;
 
   /* POSIX states calling pthread_join on a non joinable thread is

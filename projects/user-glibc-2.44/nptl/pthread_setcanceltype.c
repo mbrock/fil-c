@@ -25,36 +25,12 @@ __pthread_setcanceltype (int type, int *oldtype)
 {
   if (type < PTHREAD_CANCEL_DEFERRED || type > PTHREAD_CANCEL_ASYNCHRONOUS)
     return EINVAL;
-
-  volatile struct pthread *self = THREAD_SELF;
-
-  int oldval = atomic_load_relaxed (&self->cancelhandling);
-  while (1)
-    {
-      int newval = (type == PTHREAD_CANCEL_ASYNCHRONOUS
-		    ? oldval | CANCELTYPE_BITMASK
-		    : oldval & ~CANCELTYPE_BITMASK);
-
-      if (oldtype != NULL)
-	*oldtype = ((oldval & CANCELTYPE_BITMASK)
-		    ? PTHREAD_CANCEL_ASYNCHRONOUS : PTHREAD_CANCEL_DEFERRED);
-
-      if (oldval == newval)
-	break;
-
-      if (atomic_compare_exchange_weak_acquire (&self->cancelhandling,
-						&oldval, newval))
-	{
-	  if (cancel_enabled_and_canceled_and_async (newval))
-	    {
-	      THREAD_SETMEM (self, result, PTHREAD_CANCELED);
-	      __do_cancel (PTHREAD_CANCELED);
-	    }
-
-	  break;
-	}
-    }
-
+  int old = zthread_cancel_set (CANCELTYPE_BITMASK,
+                                type == PTHREAD_CANCEL_ASYNCHRONOUS ? CANCELTYPE_BITMASK : 0);
+  if (oldtype != NULL)
+    *oldtype = old & CANCELTYPE_BITMASK ? PTHREAD_CANCEL_ASYNCHRONOUS : PTHREAD_CANCEL_DEFERRED;
+  if (cancel_enabled_and_canceled_and_async (zthread_cancel_get ()))
+    __do_cancel (PTHREAD_CANCELED);
   return 0;
 }
 libc_hidden_def (__pthread_setcanceltype)

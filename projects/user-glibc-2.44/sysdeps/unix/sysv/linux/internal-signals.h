@@ -29,35 +29,37 @@
 #include <pizlonated_syscalls.h>
 
 /* The signal used for asynchronous cancelation.  */
-#define SIGCANCEL       __SIGRTMIN
+#define SIGCANCEL       (__SIGRTMIN + 2)
 
 
 /* Signal used to implement the setuid et.al. functions.  */
-#define SIGSETXID       (__SIGRTMIN + 1)
+#define SIGSETXID       (__SIGRTMIN + 3)
 
 
 /* Signal needed for the kernel-supported POSIX timer implementation.
    We can reuse the cancellation signal since we can distinguish
    cancellation from timer expirations.  */
-#define SIGTIMER        (__SIGRTMIN + 2)
+#define SIGTIMER        (__SIGRTMIN + 4)
 
 
 /* How many signal numbers need to be reserved for libpthread's private uses
    (SIGCANCEL and SIGSETXID).  */
-#define RESERVED_SIGRT  3
+#define RESERVED_SIGRT  5
 
 
 /* Return is sig is used internally.  */
 static inline bool
 is_internal_signal (int sig)
 {
-  return (sig == SIGCANCEL) || (sig == SIGSETXID) || (sig == SIGTIMER);
+  return sig >= __SIGRTMIN && sig < __SIGRTMIN + RESERVED_SIGRT;
 }
 
 /* Remove internal glibc signal from the mask.  */
 static inline void
 clear_internal_signals (sigset_t *set)
 {
+  __sigdelset (set, __SIGRTMIN);
+  __sigdelset (set, __SIGRTMIN + 1);
   __sigdelset (set, SIGCANCEL);
   __sigdelset (set, SIGSETXID);
   __sigdelset (set, SIGTIMER);

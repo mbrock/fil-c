@@ -24,9 +24,15 @@
 #include <socketcall.h>
 #include <kernel-features.h>
 #include <pizlonated_syscalls.h>
+#include <pthreadP.h>
 
 int
 accept4 (int fd, __SOCKADDR_ARG addr, socklen_t *addr_len, int flags)
 {
-  return zsys_accept4 (fd, addr.__sockaddr__, addr_len, flags);
+  __pthread_testcancel ();
+  int canceled;
+  int result = zsys_accept4_cancel (fd, addr.__sockaddr__, addr_len, flags, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }

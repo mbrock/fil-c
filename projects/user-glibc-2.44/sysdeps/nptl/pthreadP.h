@@ -19,6 +19,7 @@
 #define _PTHREADP_H	1
 
 #include <pthread.h>
+#include <pizlonated_runtime.h>
 #include <setjmp.h>
 #include <stdbool.h>
 #include <sys/syscall.h>
@@ -249,27 +250,13 @@ __attribute ((noreturn, always_inline))
 __do_cancel (void *result)
 {
   struct pthread *self = THREAD_SELF;
-
   self->result = result;
-
-  /* Make sure we get no more cancellations.  */
-  int oldval = atomic_load_relaxed (&self->cancelhandling);
-  int newval;
-  do
-    {
-      /* It is required by POSIX XSH 2.9.5 Thread Cancellation under the
-	 heading Thread Cancellation Cleanup Handlers and also prevents
-	 further cancellation points from acting on cancellation.  */
-      newval = oldval | CANCELSTATE_BITMASK | EXITING_BITMASK;
-      newval = newval & ~CANCELTYPE_BITMASK;
-      if (oldval == newval)
-	break;
-    }
-  while (!atomic_compare_exchange_weak_acquire (&self->cancelhandling,
-						&oldval, newval));
-
-  __pthread_unwind ((__pthread_unwind_buf_t *)
-		    THREAD_GETMEM (self, cleanup_jmp_buf));
+  zthread_cancel_set (CANCELSTATE_BITMASK | CANCELTYPE_BITMASK | EXITING_BITMASK,
+                      CANCELSTATE_BITMASK | EXITING_BITMASK);
+  /* Preserve the user-libc TCB lifetime/setxid protocol. Pending, enabled and
+     type state are authoritative only in the native thread control. */
+  atomic_fetch_or_relaxed (&self->cancelhandling, EXITING_BITMASK);
+  __pthread_unwind ((__pthread_unwind_buf_t *) THREAD_GETMEM (self, cleanup_jmp_buf));
 }
 
 extern long int __syscall_cancel_arch (volatile int *, __syscall_arg_t nr,

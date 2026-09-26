@@ -84,6 +84,9 @@ filc_bool zthread_join(void* thread, void** result); /* Only fails with ESRCH fo
                                                         Returns true on success, false on failure
                                                         and sets errno. */
 filc_bool zthread_kill(void* thread, int sig);
+unsigned zthread_cancel_get(void);
+unsigned zthread_cancel_set(unsigned mask, unsigned bits);
+filc_bool zthread_cancel_request(void* thread);
 
 void* zthread_stack_limit(void* thread);
 void* zthread_stack_top(void* thread);

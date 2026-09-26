@@ -21,11 +21,17 @@
 #include <socketcall.h>
 #include <shlib-compat.h>
 #include <pizlonated_syscalls.h>
+#include <pthreadP.h>
 
 ssize_t
 __libc_sendmsg (int fd, const struct msghdr *msg, int flags)
 {
-  return zsys_sendmsg (fd, msg, flags);
+  __pthread_testcancel ();
+  int canceled;
+  ssize_t result = zsys_sendmsg_cancel (fd, msg, flags, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 weak_alias (__libc_sendmsg, sendmsg)
 weak_alias (__libc_sendmsg, __sendmsg)

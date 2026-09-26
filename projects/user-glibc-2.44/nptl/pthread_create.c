@@ -363,6 +363,9 @@ start_thread (void *arg)
       THREAD_SETMEM (pd, result, ret);
     }
 
+  zthread_cancel_set (CANCELSTATE_BITMASK | CANCELTYPE_BITMASK | EXITING_BITMASK,
+                      CANCELSTATE_BITMASK | EXITING_BITMASK);
+
   /* Call destructors for the thread_local TLS variables.  */
   call_function_static_weak (__call_tls_dtors);
 

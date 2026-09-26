@@ -162,6 +162,9 @@ struct _pthread_cleanup_buffer
   void *__arg;                            /* Its argument.  */
   int __canceltype;                       /* Saved cancellation type. */
   struct _pthread_cleanup_buffer *__prev; /* Chaining of cleanup functions.  */
+  /* Fil-C locals may be heap allocated, so the buffer address cannot locate
+     its owning call frame during forced unwinding. */
+  void *__filc_frame;
 };
 
 /* Cancellation */

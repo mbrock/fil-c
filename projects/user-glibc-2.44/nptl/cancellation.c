@@ -29,12 +29,11 @@ __internal_syscall_cancel (__syscall_arg_t a1, __syscall_arg_t a2,
 			   __syscall_arg_t nr)
 {
   long int result;
-  struct pthread *pd = THREAD_SELF;
 
   /* If cancellation is not enabled, call the syscall directly and also
      for thread terminatation to avoid call __syscall_do_cancel while
      executing cleanup handlers.  */
-  int ch = atomic_load_relaxed (&pd->cancelhandling);
+  int ch = zthread_cancel_get ();
   if (SINGLE_THREAD_P || !cancel_enabled (ch) || cancel_exiting (ch))
     {
       result = INTERNAL_SYSCALL_NCS_CALL (nr, a1, a2, a3, a4, a5, a6
@@ -46,12 +45,12 @@ __internal_syscall_cancel (__syscall_arg_t a1, __syscall_arg_t a2,
 
   /* Call the arch-specific entry points that contains the globals markers
      to be checked by SIGCANCEL handler.  */
-  result = __syscall_cancel_arch (&pd->cancelhandling, nr, a1, a2, a3, a4, a5,
+  result = __syscall_cancel_arch (&ch, nr, a1, a2, a3, a4, a5,
 			          a6 __SYSCALL_CANCEL7_ARCH_ARG7);
 
   /* If the cancellable syscall was interrupted by SIGCANCEL and it has no
      side-effect, cancel the thread if cancellation is enabled.  */
-  ch = atomic_load_relaxed (&pd->cancelhandling);
+  ch = zthread_cancel_get ();
   /* The behaviour here assumes that EINTR is returned only if there are no
      visible side effects.  POSIX Issue 7 has not yet provided any stronger
      language for close, and in theory the close syscall could return EINTR
@@ -84,27 +83,5 @@ __syscall_cancel (__syscall_arg_t a1, __syscall_arg_t a2,
 _Noreturn void
 __syscall_do_cancel (void)
 {
-  struct pthread *self = THREAD_SELF;
-
-  /* Disable thread cancellation to avoid cancellable entrypoints calling
-     __syscall_do_cancel recursively.  We atomic load relaxed to check the
-     state of cancelhandling, there is no particular ordering requirement
-     between the syscall call and the other thread setting our cancelhandling
-     with a atomic store acquire.
-
-     POSIX Issue 7 notes that the cancellation occurs asynchronously on the
-     target thread, that implies there is no ordering requirements.  It does
-     not need a MO release store here.  */
-  int oldval = atomic_load_relaxed (&self->cancelhandling);
-  while (1)
-    {
-      int newval = oldval | CANCELSTATE_BITMASK;
-      if (oldval == newval)
-	break;
-      if (atomic_compare_exchange_weak_acquire (&self->cancelhandling,
-						&oldval, newval))
-	break;
-    }
-
   __do_cancel (PTHREAD_CANCELED);
 }

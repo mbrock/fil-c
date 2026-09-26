@@ -23,9 +23,15 @@
 
 #include <sysdep-cancel.h>
 #include <pizlonated_syscalls.h>
+#include <pthreadP.h>
 
 int
 epoll_wait (int epfd, struct epoll_event *events, int maxevents, int timeout)
 {
-  return zsys_epoll_wait (epfd, events, maxevents, timeout);
+  __pthread_testcancel ();
+  int canceled;
+  int result = zsys_epoll_wait_cancel (epfd, events, maxevents, timeout, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }

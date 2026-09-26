@@ -18,6 +18,7 @@
 
 #include <unistd.h>
 #include <sysdep-cancel.h>
+#include <pthreadP.h>
 #include <not-cancel.h>
 #include <pizlonated_syscalls.h>
 
@@ -25,7 +26,12 @@
 int
 __close (int fd)
 {
-  return zsys_close (fd);
+  __pthread_testcancel ();
+  int canceled;
+  int result = zsys_close_cancel (fd, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 libc_hidden_def (__close)
 strong_alias (__close, __libc_close)

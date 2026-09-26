@@ -20,11 +20,17 @@
 #include <sys/uio.h>
 #include <sysdep-cancel.h>
 #include <pizlonated_syscalls.h>
+#include <pthreadP.h>
 
 ssize_t
 __writev (int fd, const struct iovec *iov, int iovcnt)
 {
-  return zsys_writev (fd, iov, iovcnt);
+  __pthread_testcancel ();
+  int canceled;
+  ssize_t result = zsys_writev_cancel (fd, iov, iovcnt, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 libc_hidden_def (__writev)
 weak_alias (__writev, writev)

@@ -23,13 +23,27 @@
 #include <sysdep-cancel.h>
 #include <shlib-compat.h>
 #include <pizlonated_syscalls.h>
+#include <pthreadP.h>
 
 /* Open FILE with access OFLAG.  If O_CREAT or O_TMPFILE is in OFLAG,
    a third argument is the file protection.  */
 int
 __libc_open64 (const char *file, int oflag, ...)
 {
-  return *(int *) zcall (zsys_open, zargs ());
+  __pthread_testcancel ();
+  mode_t mode = 0;
+  if (__OPEN_NEEDS_MODE (oflag))
+    {
+      va_list ap;
+      va_start (ap, oflag);
+      mode = va_arg (ap, int);
+      va_end (ap);
+    }
+  int canceled;
+  int result = zsys_openat_cancel (AT_FDCWD, file, oflag, mode, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 
 strong_alias (__libc_open64, __open64)

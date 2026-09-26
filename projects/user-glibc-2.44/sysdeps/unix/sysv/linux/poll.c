@@ -20,13 +20,19 @@
 #include <sys/poll.h>
 
 #include <sysdep-cancel.h>
+#include <pthreadP.h>
 #include <sys/syscall.h>
 #include <pizlonated_syscalls.h>
 
 int
 __poll (struct pollfd *fds, nfds_t nfds, int timeout)
 {
-  return zsys_poll (fds, nfds, timeout);
+  __pthread_testcancel ();
+  int canceled;
+  int result = zsys_poll_cancel (fds, nfds, timeout, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 libc_hidden_def (__poll)
 weak_alias (__poll, poll)

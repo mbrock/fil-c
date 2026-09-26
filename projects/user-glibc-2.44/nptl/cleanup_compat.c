@@ -28,6 +28,7 @@ __pthread_cleanup_push (struct _pthread_cleanup_buffer *buffer,
   buffer->__routine = routine;
   buffer->__arg = arg;
   buffer->__prev = THREAD_GETMEM (self, cleanup);
+  buffer->__filc_frame = zget_call_frame (1);
 
   THREAD_SETMEM (self, cleanup, buffer);
 }

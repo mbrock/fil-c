@@ -834,6 +834,10 @@ struct PAS_ALIGNED(FILC_CC_ALIGNMENT) filc_thread {
        by having a guard page. */
     char* space_with_guard_page;
     char* guard_page;
+
+    /* Cancellation control belongs to the runtime, so native signal delivery
+       does not inspect a user-owned TLS object. Zero means enabled/deferred. */
+    unsigned cancel_state;
 };
 
 enum filc_exit_allowed_mode {

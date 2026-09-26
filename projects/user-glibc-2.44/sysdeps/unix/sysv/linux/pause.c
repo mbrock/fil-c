@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sysdep-cancel.h>
+#include <pthreadP.h>
 #include <pizlonated_syscalls.h>
 
 /* Suspend the process until a signal arrives.
@@ -26,6 +27,11 @@
 int
 __libc_pause (void)
 {
-  return zsys_pause ();
+  __pthread_testcancel ();
+  int canceled;
+  int result = zsys_pause_cancel (&canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 weak_alias (__libc_pause, pause)

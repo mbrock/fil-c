@@ -22,9 +22,7 @@
 void
 ___pthread_testcancel (void)
 {
-  struct pthread *self = THREAD_SELF;
-  int cancelhandling = atomic_load_relaxed (&self->cancelhandling);
-  if (cancel_enabled_and_canceled (cancelhandling))
+  if (cancel_enabled_and_canceled (zthread_cancel_get ()))
     __do_cancel (PTHREAD_CANCELED);
 }
 versioned_symbol (libc, ___pthread_testcancel, pthread_testcancel, GLIBC_2_34);

@@ -308,6 +308,22 @@ int zsys_close(int fd)
     return result;
 }
 
+int zsys_close_cancel(int fd, int* canceled)
+{
+    struct fd_holder* holder = fd >= 0 ? get_locked_existing_fd_holder(fd) : 0;
+    int result = zsys_close_cancel_impl(fd, canceled);
+    if (holder) {
+        /* The native gate cancels only before Linux executes close. Once the
+           call returns, even with EINTR, this descriptor's backer is no longer
+           owned by it. Keep the holder locked across both native completion
+           and this update so reuse cannot observe the old association. */
+        if (!*canceled)
+            holder->backer = 0;
+        lock_unlock(&holder->lock);
+    }
+    return result;
+}
+
 int zsys_fcntl(int fd, int cmd, ...)
 {
     if (fd < 0) {
@@ -410,6 +426,13 @@ static void fix_events(int epfd, void* raw_events, int result)
 int zsys_epoll_wait(int epfd, void* events, int maxevents, int timeout)
 {
     int result = zsys_epoll_wait_impl(epfd, events, maxevents, timeout);
+    fix_events(epfd, events, result);
+    return result;
+}
+
+int zsys_epoll_wait_cancel(int epfd, void* events, int maxevents, int timeout, int* canceled)
+{
+    int result = zsys_epoll_wait_cancel_impl(epfd, events, maxevents, timeout, canceled);
     fix_events(epfd, events, result);
     return result;
 }

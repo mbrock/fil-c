@@ -20,11 +20,17 @@
 #include <sysdep-cancel.h>
 #include <socketcall.h>
 #include <pizlonated_syscalls.h>
+#include <pthreadP.h>
 
 static int
 __recvmsg_syscall (int fd, struct msghdr *msg, int flags)
 {
-  return zsys_recvmsg (fd, msg, flags);
+  __pthread_testcancel ();
+  int canceled;
+  ssize_t result = zsys_recvmsg_cancel (fd, msg, flags, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 
 ssize_t

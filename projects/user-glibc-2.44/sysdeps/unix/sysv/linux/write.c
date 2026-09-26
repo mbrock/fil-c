@@ -19,12 +19,18 @@
 #include <unistd.h>
 #include <sysdep-cancel.h>
 #include <pizlonated_syscalls.h>
+#include <pthreadP.h>
 
 /* Write NBYTES of BUF to FD.  Return the number written, or -1.  */
 ssize_t
 __libc_write (int fd, const void *buf, size_t nbytes)
 {
-  return zsys_write (fd, buf, nbytes);
+  __pthread_testcancel ();
+  int canceled;
+  ssize_t result = zsys_write_cancel (fd, buf, nbytes, &canceled);
+  if (canceled)
+    __do_cancel (PTHREAD_CANCELED);
+  return result;
 }
 libc_hidden_def (__libc_write)
 
