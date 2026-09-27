@@ -2135,6 +2135,11 @@ filc_ptr filc_strong_cas_ptr_with_manual_tracking(
         } else {
             void* old_ptr = *(void**)filc_ptr_ptr(ptr);
             if (old_ptr != filc_ptr_ptr(expected)) {
+                /* Another thread may have swapped in a box and written its value to the
+                   primary word after we loaded lower_or_box; pairing that value with the
+                   stale lower would lose its capability. Retry until they agree. */
+                if (filc_lower_or_box_load(lower_or_box_ptr).encoded_value != lower_or_box.encoded_value)
+                    continue;
                 old_value = filc_ptr_create_with_lower_and_ptr_and_manual_tracking(
                     filc_lower_or_box_get_lower(lower_or_box), old_ptr);
             } else {
