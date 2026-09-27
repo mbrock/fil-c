@@ -16643,6 +16643,22 @@ public:
           GlobalAlias::create(ImplFuncTy, 0, F->getLinkage(), buf.str(), NewF, &M);
         }
 
+        // The function object is this module's descriptor for F, so it must run this module's
+        // implementation. NewF usually has F's linkage and visibility, which makes its symbol
+        // interposable; referencing it would let another DSO that defines the same function
+        // supply the code, so dlsym(handle, "f") on an RTLD_LOCAL library or a -Bsymbolic
+        // library could run a different library's f. Reference NewF through a private alias,
+        // which the assembler resolves against the section. Direct calls keep using NewF's
+        // symbol, so they stay interposable as native calls are.
+        Constant* DescriptorImpl = NewF;
+        if (!NewF->hasLocalLinkage() && !NewF->hasAvailableExternallyLinkage()) {
+          GlobalAlias* LocalImpl = GlobalAlias::create(
+            ImplFuncTy, NewF->getAddressSpace(), GlobalValue::PrivateLinkage,
+            NewF->getName() + ".local", NewF, &M);
+          LocalImpl->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+          DescriptorImpl = LocalImpl;
+        }
+
         GlobalVariable* NewObjectG = new GlobalVariable(
           M, FunctionObjectTy, true, GlobalValue::InternalLinkage, nullptr,
           "pizlonatedFO_" + F->getName());
@@ -16664,8 +16680,8 @@ public:
                     IntPtrTy, static_cast<uintptr_t>(ObjectFlags) << ObjectAuxFlagsShift)) }),
             ConstantStruct::get(
               FunctionPayloadTy,
-              { Signature == GenericSignature ? RawNull : NewF,
-                Signature == GenericSignature ? NewF : calleeEntrypointThunk(
+              { Signature == GenericSignature ? RawNull : DescriptorImpl,
+                Signature == GenericSignature ? DescriptorImpl : calleeEntrypointThunk(
                   Signature, AIs, NormalizedRetType),
                 ConstantInt::get(Int64Ty, Signature) }) });
         NewObjectG->setInitializer(NewObjC);
