@@ -1,0 +1,6 @@
+return:
+  success
+optFlags:
+  "-O0"
+output-includes:
+  - "annotate ok 42"

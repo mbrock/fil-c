@@ -14441,6 +14441,31 @@ class Pizlonator {
     }
   }
 
+  /* __attribute__((annotate)) on functions and globals is collected in llvm.global.annotations,
+     an appending global in the llvm.metadata section. Only tools read it; codegen never emits
+     that section. Drop it, and the strings it points to, rather than instrument it. */
+  void removeGlobalAnnotations() {
+    GlobalVariable* Annotations = M.getGlobalVariable("llvm.global.annotations");
+    if (!Annotations)
+      return;
+    SmallPtrSet<GlobalValue*, 8> Seen;
+    std::vector<GlobalValue*> Referenced;
+    for (Use& Entry : Annotations->getInitializer()->operands()) {
+      for (Use& Field : cast<Constant>(Entry)->operands()) {
+        GlobalValue* G = dyn_cast<GlobalValue>(Field->stripPointerCasts());
+        if (G && Seen.insert(G).second)
+          Referenced.push_back(G);
+      }
+    }
+    Annotations->eraseFromParent();
+    for (GlobalValue* G : Referenced) {
+      G->removeDeadConstantUsers();
+      GlobalVariable* V = dyn_cast<GlobalVariable>(G);
+      if (V && V->getSection() == "llvm.metadata" && V->use_empty())
+        V->eraseFromParent();
+    }
+  }
+
   JmpBufKind getJmpBufKindForSetjmp(Function* F) {
     if (F->getName() == "setjmp")
       return JmpBufKind::setjmp;
@@ -15692,10 +15717,13 @@ class Pizlonator {
           case Intrinsic::experimental_noalias_scope_decl:
           case Intrinsic::invariant_start:
           case Intrinsic::invariant_end:
+          case Intrinsic::var_annotation:
             ShouldErase = true;
             break;
           case Intrinsic::launder_invariant_group:
           case Intrinsic::strip_invariant_group:
+          case Intrinsic::ptr_annotation:
+          case Intrinsic::annotation:
             CI->replaceAllUsesWith(CI->getArgOperand(0));
             ShouldErase = true;
             break;
@@ -16174,6 +16202,7 @@ public:
     Dummy = makeDummy(Int32Ty);
 
     markSetjmpsReturnTwice();
+    removeGlobalAnnotations();
     lowerIndirectBr();
 
     if (verbose)
