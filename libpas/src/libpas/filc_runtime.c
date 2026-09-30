@@ -2160,7 +2160,9 @@ filc_ptr filc_strong_cas_ptr_with_manual_tracking(
             if (old_ptr != filc_ptr_ptr(expected)) {
                 /* Another thread may have swapped in a box and written its value to the
                    primary word after we loaded lower_or_box; pairing that value with the
-                   stale lower would lose its capability. Retry until they agree. */
+                   stale lower would lose its capability. Order the primary load before
+                   the validating shadow load, including on ARM64. Retry until they agree. */
+                pas_load_load_fence();
                 if (filc_lower_or_box_load(lower_or_box_ptr).encoded_value != lower_or_box.encoded_value)
                     continue;
                 old_value = filc_ptr_create_with_lower_and_ptr_and_manual_tracking(
@@ -15714,5 +15716,4 @@ PAS_END_EXTERN_C;
 #endif /* PAS_ENABLE_FILC */
 
 #endif /* LIBPAS_ENABLED */
-
 
