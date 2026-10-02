@@ -844,6 +844,37 @@ bool CodeGenTypes::isPointerZeroInitializable(QualType T) {
   return isZeroInitializable(T);
 }
 
+bool CodeGenTypes::hasPointerRepresentation(llvm::Type *T) {
+  if (T->isPointerTy())
+    return true;
+  for (llvm::Type *Element : T->subtypes())
+    if (hasPointerRepresentation(Element))
+      return true;
+  return false;
+}
+
+bool CodeGenTypes::hasPointerRepresentation(QualType T) {
+  if (const auto *AT = Context.getAsArrayType(T))
+    return hasPointerRepresentation(AT->getElementType());
+  if (const RecordType *RT = T->getAs<RecordType>()) {
+    const RecordDecl *RD = RT->getDecl();
+    if (const auto *CXXRD = dyn_cast<CXXRecordDecl>(RD)) {
+      if (CXXRD->isDynamicClass())
+        return true;
+      for (const CXXBaseSpecifier &Base : CXXRD->bases())
+        if (hasPointerRepresentation(Base.getType()))
+          return true;
+    }
+    for (const FieldDecl *Field : RD->fields())
+      if (hasPointerRepresentation(Field->getType()))
+        return true;
+    return false;
+  }
+  // Scalar/member-pointer leaves may themselves lower to composite LLVM
+  // types. Do not convert records here while their layout is being computed.
+  return hasPointerRepresentation(ConvertTypeForMem(T));
+}
+
 bool CodeGenTypes::isZeroInitializable(QualType T) {
   if (T->getAs<PointerType>())
     return Context.getTargetNullPointerValue(T) == 0;

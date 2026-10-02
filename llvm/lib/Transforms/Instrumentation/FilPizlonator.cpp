@@ -4725,7 +4725,8 @@ class Pizlonator {
                && (F->getIntrinsicID() == Intrinsic::memcpy ||
                    F->getIntrinsicID() == Intrinsic::memcpy_inline ||
                    F->getIntrinsicID() == Intrinsic::memmove)) ||
-              ((F->getName() == "zmemmove_union" || F->getName() == "zmemmove_builtin")
+              ((F->getName() == "zmemmove_union" || F->getName() == "zmemmove_builtin" ||
+                F->getName() == "zmemmove_builtin_volatile")
                && isMemmoveFT(FT)));
     }
     return false;
@@ -4741,6 +4742,9 @@ class Pizlonator {
       return isa<ConstantInt>(CI->getArgOperand(3))
         && cast<ConstantInt>(CI->getArgOperand(3))->isZero();
     }
+    if (Function* F = dyn_cast<Function>(CI->getCalledOperand()))
+      if (F->getName() == "zmemmove_builtin_volatile")
+        return false;
     return true;
   }
 
@@ -4782,6 +4786,7 @@ class Pizlonator {
     return F->willReturn() ||
       F->getName() == "zmemmove_union" ||
       F->getName() == "zmemmove_builtin" ||
+      F->getName() == "zmemmove_builtin_volatile" ||
       F->getName() == "zhas_union" ||
       F->getName() == "zgc_alloc" ||
       F->getName() == "malloc" ||
@@ -8397,7 +8402,8 @@ class Pizlonator {
           return true;
         }
 
-        if ((F->getName() == "zmemmove_union" || F->getName() == "zmemmove_builtin")
+        if ((F->getName() == "zmemmove_union" || F->getName() == "zmemmove_builtin" ||
+             F->getName() == "zmemmove_builtin_volatile")
             && isMemmoveFT(FT)) {
           lowerMemmoveCall(CI);
           Erasify();

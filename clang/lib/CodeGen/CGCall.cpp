@@ -1164,6 +1164,39 @@ static RawAddress CreateTempAllocaForCoercion(CodeGenFunction &CGF,
   return CGF.CreateTempAlloca(Ty, Align, Name + ".coerce");
 }
 
+static void EmitPointerCoercionCopy(Address Dst, Address Src, llvm::Value *Size,
+                                   CodeGenFunction &CGF, bool IsVolatile = false) {
+  // Ordinary memcpy can be eliminated or split into misaligned pointer
+  // accesses before FilPizlonator runs. Keep volatile copies opaque too, and
+  // lower them through the same path as an existing volatile memtransfer.
+  CGF.Builder.CreateCall(
+      CGF.CGM.CreateRuntimeFunction(
+          llvm::FunctionType::get(CGF.VoidTy,
+                                 {CGF.Int8PtrTy, CGF.Int8PtrTy, CGF.SizeTy}, false),
+          IsVolatile ? "zmemmove_builtin_volatile" : "zmemmove_builtin"),
+      {Dst.emitRawPointer(CGF), Src.emitRawPointer(CGF), Size});
+}
+
+// A pointer-shaped ABI carrier may contain only numeric bits. Its source can
+// be a packed subobject even when the declared type is naturally aligned.
+// Fil-C pointer loads still require word alignment, so stage through a checked
+// bytewise copy rather than synthesizing an unaligned pointer access.
+static Address AlignForPointerCoercion(Address Src, llvm::Type *Ty,
+                                      CodeGenFunction &CGF,
+                                      bool IsVolatile = false) {
+  if (Src.getAlignment() >= CGF.getPointerAlign() ||
+      (!CodeGenTypes::hasPointerRepresentation(Ty) &&
+       !CodeGenTypes::hasPointerRepresentation(Src.getElementType())))
+    return Src;
+  RawAddress Tmp = CreateTempAllocaForCoercion(
+      CGF, Src.getElementType(), CGF.getPointerAlign(), Src.getName());
+  llvm::Value *Size = CGF.Builder.CreateTypeSize(
+      CGF.IntPtrTy,
+      CGF.CGM.getDataLayout().getTypeAllocSize(Src.getElementType()));
+  EmitPointerCoercionCopy(Tmp, Src, Size, CGF, IsVolatile);
+  return Tmp;
+}
+
 /// EnterStructPointerForCoercedAccess - Given a struct pointer that we are
 /// accessing some number of bytes out of it, try to gep into the struct to get
 /// at its inner goodness.  Dive as deep as possible without entering an element
@@ -1261,6 +1294,7 @@ static llvm::Value *CoerceIntOrPtrToIntOrPtr(llvm::Value *Val,
 /// present in the src are undefined.
 static llvm::Value *CreateCoercedLoad(Address Src, llvm::Type *Ty,
                                       CodeGenFunction &CGF) {
+  Src = AlignForPointerCoercion(Src, Ty, CGF);
   llvm::Type *SrcTy = Src.getElementType();
 
   // If SrcTy and Ty are the same, just do a load.
@@ -1276,6 +1310,11 @@ static llvm::Value *CreateCoercedLoad(Address Src, llvm::Type *Ty,
   }
 
   llvm::TypeSize SrcSize = CGF.CGM.getDataLayout().getTypeAllocSize(SrcTy);
+
+  // A validated full-word pointer carrier must load the capability from
+  // memory, even when a union's selected storage happens to be an integer.
+  if (Ty->isPointerTy() && SrcTy->isIntegerTy() && SrcSize == DstSize)
+    return CGF.Builder.CreateLoad(Src.withElementType(Ty));
 
   // If the source and destination are integer or pointer types, just do an
   // extension or truncation to the desired type.
@@ -1343,6 +1382,18 @@ void CodeGenFunction::CreateCoercedStore(llvm::Value *Src, Address Dst,
 
   llvm::Type *SrcTy = Src->getType();
   llvm::TypeSize SrcSize = CGM.getDataLayout().getTypeAllocSize(SrcTy);
+
+  if (Dst.getAlignment() < getPointerAlign() &&
+      (CodeGenTypes::hasPointerRepresentation(SrcTy) ||
+       CodeGenTypes::hasPointerRepresentation(Dst.getElementType()))) {
+    RawAddress Tmp =
+        CreateTempAllocaForCoercion(*this, SrcTy, getPointerAlign());
+    Builder.CreateStore(Src, Tmp);
+    EmitPointerCoercionCopy(
+        Dst, Tmp, Builder.CreateTypeSize(IntPtrTy, std::min(SrcSize, DstSize)),
+        *this, DstIsVolatile);
+    return;
+  }
 
   // GEP into structs to try to make types match.
   // FIXME: This isn't really that useful with opaque types, but it impacts a
@@ -5424,6 +5475,9 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
 
       // If the value is offset in memory, apply the offset now.
       Src = emitAddressAtOffset(*this, Src, ArgInfo);
+      Src = AlignForPointerCoercion(
+          Src, ArgInfo.getCoerceToType(), *this,
+          I->hasLValue() && I->getKnownLValue().isVolatileQualified());
 
       // Fast-isel and the optimizer generally like scalar values better than
       // FCAs, so we flatten them if this is safe to do for this argument.

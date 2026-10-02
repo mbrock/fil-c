@@ -17,20 +17,50 @@ struct First first(struct First value) { return value; }
 // CHECK: ret
 struct Last last(struct Last value) { return value; }
 
-// A pointer in an aggregate alternative may not be represented as a pointer in
-// the union's LLVM storage. Keep these cases on the conservative memory path.
+// Aggregate alternatives can hide pointers in LLVM storage. Small aligned
+// objects still use pointer carriers for precisely the capability-bearing words.
 struct Hidden { union { long integer; void *pointers[1]; } value; long tag; };
 struct Wide { union { void *pointer; void *pointers[2]; } value; };
 struct Large { union { void *pointer; __int128 integer; } value; };
 
-// CHECK-LABEL: define {{.*}} @pizlonatedFIP0_hidden(
-// CHECK: call {{.*}} @filc_promote_already_checked_stack_to_heap_without_exiting(
+// CHECK-LABEL: define { i1, %filc_flight_ptr, i64 } @pizlonatedFIP{{[1-9][0-9]*}}_hidden(
+// CHECK-SAME: %filc_flight_ptr {{.*}}, i64
+// CHECK-NOT: @filc_promote_already_checked_stack_to_heap_without_exiting(
+// CHECK: ret
 struct Hidden hidden(struct Hidden value) { return value; }
 
-// CHECK-LABEL: define {{.*}} @pizlonatedFIP0_wide(
-// CHECK: call {{.*}} @filc_promote_already_checked_stack_to_heap_without_exiting(
+// CHECK-LABEL: define { i1, %filc_flight_ptr, %filc_flight_ptr } @pizlonatedFIP{{[1-9][0-9]*}}_wide(
+// CHECK-SAME: %filc_flight_ptr {{.*}}, %filc_flight_ptr
+// CHECK-NOT: @filc_promote_already_checked_stack_to_heap_without_exiting(
+// CHECK: ret
 struct Wide wide(struct Wide value) { return value; }
 
-// CHECK-LABEL: define {{.*}} @pizlonatedFIP0_large(
-// CHECK: call {{.*}} @filc_promote_already_checked_stack_to_heap_without_exiting(
+// CHECK-LABEL: define { i1, %filc_flight_ptr, i64 } @pizlonatedFIP{{[1-9][0-9]*}}_large(
+// CHECK-NOT: @filc_promote_already_checked_stack_to_heap_without_exiting(
+// CHECK: ret
 struct Large large(struct Large value) { return value; }
+
+union LastWord { long bits[2]; struct { long tag; void *pointer; } value; };
+// CHECK-LABEL: define { i1, i64, %filc_flight_ptr } @pizlonatedFIP{{[1-9][0-9]*}}_last_word(
+// CHECK-SAME: i64 {{.*}}, %filc_flight_ptr
+union LastWord last_word(union LastWord value) { return value; }
+
+union Mixed { struct { void *pointer; double number; } value; double numbers[2]; };
+// CHECK-LABEL: define { i1, %filc_flight_ptr, double } @pizlonatedFIP{{[1-9][0-9]*}}_mixed(
+// CHECK-SAME: %filc_flight_ptr {{.*}}, double
+union Mixed mixed(union Mixed value) { return value; }
+
+union Numeric { long integer; double number; };
+// CHECK-LABEL: define { i1, i64 } @pizlonatedFIP{{[1-9][0-9]*}}_numeric(
+// CHECK-SAME: i64
+union Numeric numeric(union Numeric value) { return value; }
+
+union Oversized { void *pointer; long words[3]; };
+// CHECK-LABEL: define {{.*}} @pizlonatedFIP0_oversized(
+// CHECK: call {{.*}} @filc_promote_already_checked_stack_to_heap_without_exiting(
+union Oversized oversized(union Oversized value) { return value; }
+
+union __attribute__((packed)) UnderAligned { void *pointer; long integer; };
+// CHECK-LABEL: define {{.*}} @pizlonatedFIP0_under_aligned(
+// CHECK: call {{.*}} @filc_promote_already_checked_stack_to_heap_without_exiting(
+union UnderAligned under_aligned(union UnderAligned value) { return value; }
