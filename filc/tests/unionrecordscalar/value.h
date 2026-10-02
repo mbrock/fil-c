@@ -15,6 +15,7 @@ struct Hidden { union { long integer; int* pointers[1]; } value; long tag; };
 struct Wide { union { void* pointer; int* pointers[2]; } value; };
 struct Large { union { void* pointer; __int128 integer; } value; };
 
+union Scalar scalar(union Scalar value);
 struct First first(struct First value);
 struct Last last(struct Last value);
 struct Array array(struct Array value);

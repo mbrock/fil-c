@@ -2612,7 +2612,7 @@ static bool containsUnionRequiringMemory(QualType Ty, CodeGenTypes &CGT) {
 }
 
 ABIArgInfo X86_64ABIInfo::classifyReturnType(QualType RetTy) const {
-  if (RetTy->isUnionType() || containsUnionRequiringMemory(RetTy, CGT))
+  if (containsUnionRequiringMemory(RetTy, CGT))
     return getIndirectReturnResult(RetTy);
 
   // AMD64-ABI 3.2.3p4: Rule 1. Classify the return type with the
@@ -2757,7 +2757,7 @@ X86_64ABIInfo::classifyArgumentType(QualType Ty, unsigned freeIntRegs,
   Ty = useFirstFieldIfTransparentUnion(Ty);
 
   X86_64ABIInfo::Class Lo, Hi;
-  if (Ty->isUnionType() || containsUnionRequiringMemory(Ty, CGT)) {
+  if (containsUnionRequiringMemory(Ty, CGT)) {
     Lo = Memory;
     Hi = NoClass;
   } else

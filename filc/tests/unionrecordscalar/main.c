@@ -8,6 +8,13 @@ static int add(int value) { return value + 13; }
 int main(void)
 {
     int x = 42, y = 7;
+    union Scalar bare = { .pointer = &x };
+    union Scalar (*volatile indirect_bare)(union Scalar) = scalar;
+    bare = indirect_bare(bare);
+    assert(*(int*)bare.pointer == 42);
+    bare.function = add;
+    bare = scalar(bare);
+    assert(bare.function(29) == 42);
     struct First a = { .value.pointer = &x, .tag = 17 };
     struct Last b = { .tag = 19, .value.pointer = &y };
     a = first(a);
@@ -45,6 +52,10 @@ int main(void)
         a = first(a);
         unsigned long got;
         memcpy(&got, &a.value.number, sizeof(double));
+        assert(got == bits[i]);
+        memcpy(&bare.number, &bits[i], sizeof(double));
+        bare = scalar(bare);
+        memcpy(&got, &bare.number, sizeof(double));
         assert(got == bits[i]);
     }
 

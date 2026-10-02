@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stdarg.h>
 
+union Scalar scalar(union Scalar value) { return value; }
 struct First first(struct First value) { return value; }
 struct Last last(struct Last value) { return value; }
 struct Array array(struct Array value) { return value; }
