@@ -2567,35 +2567,54 @@ GetX86_64ByValArgumentPair(llvm::Type *Lo, llvm::Type *Hi,
   return Result;
 }
 
-// Fil-C: a union is passed and returned in memory, because a union's
-// eightbytes can hold a pointer on one path and an integer on another, and
-// coercing them to integer registers drops the pointer's capability. The
-// same holds for a union nested in a struct or array, e.g. the storage of
-// std::variant<long, int *>.
-static bool containsUnion(QualType Ty, ASTContext &Context) {
+// Fil-C: integer coercion of a union's pointer-bearing words can drop their
+// capabilities, including when the union is nested in a record. A scalar union
+// stored entirely as one pointer is safe: GetINTEGERTypeAtOffset preserves that
+// pointer type. Keep such records (notably QuickJS's JSValue) on the direct
+// path rather than introducing byval copies and generic Fil-C calls. Aggregate
+// union members, such as std::variant's storage, still require memory.
+static bool containsUnionRequiringMemory(QualType Ty, CodeGenTypes &CGT) {
+  ASTContext &Context = CGT.getContext();
   if (const ConstantArrayType *AT = Context.getAsConstantArrayType(Ty))
-    return containsUnion(AT->getElementType(), Context);
+    return containsUnionRequiringMemory(AT->getElementType(), CGT);
   const RecordType *RT = Ty->getAs<RecordType>();
   if (!RT)
     return false;
   const RecordDecl *RD = RT->getDecl();
-  if (RD->isUnion())
-    return true;
+  if (RD->isUnion()) {
+    auto *Storage = dyn_cast<llvm::StructType>(CGT.ConvertTypeForMem(Ty));
+    if (!Storage || Storage->getNumElements() != 1 ||
+        !Storage->getElementType(0)->isPointerTy())
+      return true;
+    llvm::Type *Pointer = Storage->getElementType(0);
+    if (Context.getTypeSizeInChars(Ty).getQuantity() !=
+        CGT.getDataLayout().getTypeAllocSize(Pointer))
+      return true;
+    for (const FieldDecl *FD : RD->fields()) {
+      QualType FieldTy = FD->getType();
+      if (FieldTy->isPointerType()) {
+        if (CGT.ConvertTypeForMem(FieldTy) != Pointer)
+          return true;
+      } else if (!FieldTy->isArithmeticType() && !FieldTy->isEnumeralType()) {
+        return true;
+      }
+    }
+    return false;
+  }
   if (const CXXRecordDecl *CXXRD = dyn_cast<CXXRecordDecl>(RD))
     for (const CXXBaseSpecifier &B : CXXRD->bases())
-      if (containsUnion(B.getType(), Context))
+      if (containsUnionRequiringMemory(B.getType(), CGT))
         return true;
   for (const FieldDecl *FD : RD->fields())
-    if (containsUnion(FD->getType(), Context))
+    if (containsUnionRequiringMemory(FD->getType(), CGT))
       return true;
   return false;
 }
 
-ABIArgInfo X86_64ABIInfo::
-classifyReturnType(QualType RetTy) const {
-  if (RetTy->isUnionType() || containsUnion(RetTy, getContext()))
+ABIArgInfo X86_64ABIInfo::classifyReturnType(QualType RetTy) const {
+  if (RetTy->isUnionType() || containsUnionRequiringMemory(RetTy, CGT))
     return getIndirectReturnResult(RetTy);
-  
+
   // AMD64-ABI 3.2.3p4: Rule 1. Classify the return type with the
   // classification algorithm.
   X86_64ABIInfo::Class Lo, Hi;
@@ -2729,7 +2748,7 @@ X86_64ABIInfo::classifyArgumentType(QualType Ty, unsigned freeIntRegs,
   Ty = useFirstFieldIfTransparentUnion(Ty);
 
   X86_64ABIInfo::Class Lo, Hi;
-  if (Ty->isUnionType() || containsUnion(Ty, getContext())) {
+  if (Ty->isUnionType() || containsUnionRequiringMemory(Ty, CGT)) {
     Lo = Memory;
     Hi = NoClass;
   } else
