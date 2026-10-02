@@ -2745,6 +2745,15 @@ ABIArgInfo
 X86_64ABIInfo::classifyArgumentType(QualType Ty, unsigned freeIntRegs,
                                     unsigned &neededInt, unsigned &neededSSE,
                                     bool isNamedArg, bool IsRegCall) const {
+  // Fil-C snapshots unnamed aggregates as complete objects. Register coercions
+  // can omit tail padding or flatten fields with a different packet layout.
+  // Keep nontrivial C++ invisible-reference arguments on their existing path.
+  if (!isNamedArg && isAggregateTypeForABI(Ty) &&
+      !getRecordArgABI(Ty, getCXXABI())) {
+    neededInt = neededSSE = 0;
+    return getNaturalAlignIndirect(Ty, /*ByVal=*/true);
+  }
+
   Ty = useFirstFieldIfTransparentUnion(Ty);
 
   X86_64ABIInfo::Class Lo, Hi;
@@ -3064,6 +3073,24 @@ static Address EmitX86_64VAArgFromMemory(CodeGenFunction &CGF,
 
 RValue X86_64ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
                                 QualType Ty, AggValueSlot Slot) const {
+  if (isAggregateTypeForABI(Ty) && !getRecordArgABI(Ty, getCXXABI())) {
+    llvm::Type *Storage = CGF.ConvertTypeForMem(Ty);
+    const llvm::DataLayout &DL = CGT.getDataLayout();
+    uint64_t Size = DL.getTypeAllocSize(Storage);
+    uint64_t PacketAlignment =
+        std::max<uint64_t>(8, DL.getABITypeAlign(Storage).value());
+    llvm::Value *Ptr = CGF.Builder.CreateCall(
+        CGF.CGM.getIntrinsic(llvm::Intrinsic::filc_va_arg_address),
+        {VAListAddr.emitRawPointer(CGF),
+         llvm::ConstantInt::get(CGF.Int64Ty, Size),
+         llvm::ConstantInt::get(CGF.Int64Ty, PacketAlignment)}, "vaarg.addr");
+    // Snapshots are heap allocations with at least 16-byte base alignment.
+    // Entry offsets may be more aligned than their absolute packet addresses.
+    Address Source(
+        Ptr, Storage,
+        CharUnits::fromQuantity(std::min<uint64_t>(16, PacketAlignment)));
+    return CGF.EmitLoadOfAnyValue(CGF.MakeAddrLValue(Source, Ty), Slot);
+  }
   return CGF.EmitLoadOfAnyValue(
     CGF.MakeAddrLValue(
       EmitVAArgInstr(CGF, VAListAddr, Ty, ABIArgInfo::getDirect()), Ty),

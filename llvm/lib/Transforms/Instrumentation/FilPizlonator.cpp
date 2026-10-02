@@ -4919,6 +4919,12 @@ class Pizlonator {
         Func(II, RawPtrTy, II->getArgOperand(0), Align(WordSize), AtomicOrdering::NotAtomic,
              AccessKind::Write);
         return;
+      case Intrinsic::filc_va_arg_address:
+        Func(II, RawPtrTy, II->getArgOperand(0), Align(WordSize), AtomicOrdering::NotAtomic,
+             AccessKind::Read);
+        Func(II, RawPtrTy, II->getArgOperand(0), Align(WordSize), AtomicOrdering::NotAtomic,
+             AccessKind::Write);
+        return;
       case Intrinsic::vacopy:
         Func(II, RawPtrTy, II->getArgOperand(0), Align(WordSize), AtomicOrdering::NotAtomic,
              AccessKind::Write);
@@ -7956,6 +7962,36 @@ class Pizlonator {
         lowerConstantOperand(II->getArgOperandUse(1), I);
         Value* Load = loadPtr(accessDataForOperand(II->getArgOperand(1), II, 1, II).MAD, II);
         storePtr(Load, accessDataForOperand(II->getArgOperand(0), II, 0, II).MAD, II);
+        II->eraseFromParent();
+        return true;
+      }
+
+      case Intrinsic::filc_va_arg_address: {
+        lowerConstantOperand(II->getArgOperandUse(0), II);
+        FullMemoryAccessData Access = accessDataForOperand(II->getArgOperand(0), II, 0, II);
+        Value* Cursor = loadPtr(Access.MAD, II);
+        uint64_t Alignment = cast<ConstantInt>(II->getArgOperand(2))->getZExtValue();
+        assert(Alignment >= WordSize && isPowerOf2_64(Alignment));
+        // Packet offsets are aligned relative to the allocation's payload,
+        // even when the heap base is not aligned to a vector's ABI alignment.
+        Value* Offset = flightPtrOffset(Cursor, II);
+        Offset = BinaryOperator::CreateAdd(
+          Offset, ConstantInt::get(IntPtrTy, Alignment - 1), "filc_va_arg_round", II);
+        Offset = BinaryOperator::CreateAnd(
+          Offset, ConstantInt::get(IntPtrTy, -Alignment), "filc_va_arg_offset", II);
+        Value* AlignedPtr = GetElementPtrInst::Create(
+          Int8Ty, flightPtrLower(Cursor, II), { Offset }, "filc_va_arg_aligned", II);
+        storePtr(flightPtrWithPtr(Cursor, AlignedPtr, II), Access.MAD, II);
+        storeOrigin(getOrigin(II->getDebugLoc()), II);
+        CallInst* Call = CallInst::Create(
+          GetNextPtrBytesForVAArg,
+          { II->getArgOperand(0), II->getArgOperand(1),
+            ConstantInt::get(IntPtrTy, std::min<uint64_t>(16, Alignment)) },
+          "filc_va_arg_address", II);
+        Value* Payload = ExtractValueInst::Create(RawPtrTy, Call, { 0 }, "filc_va_arg_payload", II);
+        // The helper may observe a changed cursor. Subsequent aggregate copying
+        // checks this reconstructed capability; the helper's check is not reused.
+        II->replaceAllUsesWith(flightPtrWithPtr(Cursor, Payload, II));
         II->eraseFromParent();
         return true;
       }
