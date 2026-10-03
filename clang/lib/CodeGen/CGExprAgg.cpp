@@ -780,8 +780,8 @@ void AggExprEmitter::VisitCastExpr(CastExpr *E) {
     }
 
     LValue SourceLV = CGF.EmitLValue(E->getSubExpr());
-    Address SourceAddress = SourceLV.getAddress().withElementType(CGF.Int8Ty);
-    Address DestAddress = Dest.getAddress().withElementType(CGF.Int8Ty);
+    Address SourceAddress = SourceLV.getAddress();
+    Address DestAddress = Dest.getAddress();
     llvm::Value *SizeVal = llvm::ConstantInt::get(
         CGF.SizeTy,
         CGF.getContext().getTypeSizeInChars(E->getType()).getQuantity());
@@ -2227,9 +2227,6 @@ void CodeGenFunction::EmitAggregateCopy(LValue Dest, LValue Src, QualType Ty,
   // we need to use a different call here.  We use isVolatile to indicate when
   // either the source or the destination is volatile.
 
-  DestPtr = DestPtr.withElementType(Int8Ty);
-  SrcPtr = SrcPtr.withElementType(Int8Ty);
-
   // Don't do any of the memmove_collectable tests if GC isn't set.
   if (CGM.getLangOpts().getGC() == LangOptions::NonGC) {
     // fall through
@@ -2251,6 +2248,9 @@ void CodeGenFunction::EmitAggregateCopy(LValue Dest, LValue Src, QualType Ty,
     }
   }
 
+  // Retain the storage types so the builder can protect unaligned pointer
+  // words from early memcpy scalarization. The copy extent still honors
+  // potentially-overlapping subobjects above.
   auto Inst = Builder.CreateMemCpy(DestPtr, SrcPtr, SizeVal, isVolatile);
 
   // Determine the metadata to describe the position of any padding in this

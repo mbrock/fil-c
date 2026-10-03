@@ -159,15 +159,19 @@ private:
   /// when zero-initialized.
   bool IsZeroInitializableAsBase : 1;
 
+  /// Fil-C represents this union as pointer words plus an exact byte tail.
+  /// Member accesses still use their declared types and AST offsets.
+  bool HasPointerWordStorage : 1;
+
 public:
   CGRecordLayout(llvm::StructType *CompleteObjectType,
-                 llvm::StructType *BaseSubobjectType,
-                 bool IsZeroInitializable,
-                 bool IsZeroInitializableAsBase)
-    : CompleteObjectType(CompleteObjectType),
-      BaseSubobjectType(BaseSubobjectType),
-      IsZeroInitializable(IsZeroInitializable),
-      IsZeroInitializableAsBase(IsZeroInitializableAsBase) {}
+                 llvm::StructType *BaseSubobjectType, bool IsZeroInitializable,
+                 bool IsZeroInitializableAsBase, bool HasPointerWordStorage)
+      : CompleteObjectType(CompleteObjectType),
+        BaseSubobjectType(BaseSubobjectType),
+        IsZeroInitializable(IsZeroInitializable),
+        IsZeroInitializableAsBase(IsZeroInitializableAsBase),
+        HasPointerWordStorage(HasPointerWordStorage) {}
 
   /// Return the "complete object" LLVM type associated with
   /// this record.
@@ -192,6 +196,8 @@ public:
   bool isZeroInitializableAsBase() const {
     return IsZeroInitializableAsBase;
   }
+
+  bool hasPointerWordStorage() const { return HasPointerWordStorage; }
 
   bool containsFieldDecl(const FieldDecl *FD) const {
     return FieldInfo.count(FD) != 0;

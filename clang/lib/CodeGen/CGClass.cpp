@@ -999,8 +999,18 @@ namespace {
 
   private:
     void emitMemcpyIR(Address DestPtr, Address SrcPtr, CharUnits Size) {
-      DestPtr = DestPtr.withElementType(CGF.Int8Ty);
-      SrcPtr = SrcPtr.withElementType(CGF.Int8Ty);
+      // This range may include several fields, not just the first field's
+      // type. Conservatively keep grouped copies opaque if the containing
+      // record has unaligned pointer words. Preserve the original range size.
+      QualType RecordType = CGF.getContext().getTypeDeclType(ClassDecl);
+      llvm::Type *RecordTy = CGF.ConvertTypeForMem(RecordType);
+      if (CodeGenTypes::hasUnalignedPointers(
+              RecordTy, CGF.getContext().getTypeAlignInChars(RecordType),
+              CGF.CGM.getDataLayout())) {
+        CGF.Builder.CreateOpaqueMemCpy(DestPtr, SrcPtr,
+                                       CGF.Builder.getSize(Size.getQuantity()));
+        return;
+      }
       CGF.Builder.CreateMemCpy(DestPtr, SrcPtr, Size.getQuantity());
     }
 

@@ -1164,19 +1164,6 @@ static RawAddress CreateTempAllocaForCoercion(CodeGenFunction &CGF,
   return CGF.CreateTempAlloca(Ty, Align, Name + ".coerce");
 }
 
-static void EmitPointerCoercionCopy(Address Dst, Address Src, llvm::Value *Size,
-                                   CodeGenFunction &CGF, bool IsVolatile = false) {
-  // Ordinary memcpy can be eliminated or split into misaligned pointer
-  // accesses before FilPizlonator runs. Keep volatile copies opaque too, and
-  // lower them through the same path as an existing volatile memtransfer.
-  CGF.Builder.CreateCall(
-      CGF.CGM.CreateRuntimeFunction(
-          llvm::FunctionType::get(CGF.VoidTy,
-                                 {CGF.Int8PtrTy, CGF.Int8PtrTy, CGF.SizeTy}, false),
-          IsVolatile ? "zmemmove_builtin_volatile" : "zmemmove_builtin"),
-      {Dst.emitRawPointer(CGF), Src.emitRawPointer(CGF), Size});
-}
-
 // A pointer-shaped ABI carrier may contain only numeric bits. Its source can
 // be a packed subobject even when the declared type is naturally aligned.
 // Fil-C pointer loads still require word alignment, so stage through a checked
@@ -1193,7 +1180,7 @@ static Address AlignForPointerCoercion(Address Src, llvm::Type *Ty,
   llvm::Value *Size = CGF.Builder.CreateTypeSize(
       CGF.IntPtrTy,
       CGF.CGM.getDataLayout().getTypeAllocSize(Src.getElementType()));
-  EmitPointerCoercionCopy(Tmp, Src, Size, CGF, IsVolatile);
+  CGF.Builder.CreateOpaqueMemCpy(Tmp, Src, Size, IsVolatile);
   return Tmp;
 }
 
@@ -1389,9 +1376,9 @@ void CodeGenFunction::CreateCoercedStore(llvm::Value *Src, Address Dst,
     RawAddress Tmp =
         CreateTempAllocaForCoercion(*this, SrcTy, getPointerAlign());
     Builder.CreateStore(Src, Tmp);
-    EmitPointerCoercionCopy(
+    Builder.CreateOpaqueMemCpy(
         Dst, Tmp, Builder.CreateTypeSize(IntPtrTy, std::min(SrcSize, DstSize)),
-        *this, DstIsVolatile);
+        DstIsVolatile);
     return;
   }
 
@@ -2807,7 +2794,7 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
         Attrs.addAttribute(llvm::Attribute::InReg);
 
       if (AI.getIndirectByVal())
-        Attrs.addByValAttr(getTypes().ConvertTypeForMem(ParamType));
+        Attrs.addByValAttr(getTypes().ConvertTypeForByVal(ParamType));
 
       auto *Decl = ParamType->getAsRecordDecl();
       if (CodeGenOpts.PassByValueIsNoAlias && Decl &&
@@ -5307,13 +5294,17 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       assert(NumIRArgs == 1);
       if (I->isAggregate()) {
         // We want to avoid creating an unnecessary temporary+copy here;
-        // however, we need one in three cases:
+        // however, we need one in four cases:
         // 1. If the argument is not byval, and we are required to copy the
         //    source.  (This case doesn't occur on any common architecture.)
         // 2. If the argument is byval, RV is not sufficiently aligned, and
         //    we cannot force it to be sufficiently aligned.
         // 3. If the argument is byval, but RV is not located in default
         //    or alloca address space.
+        // 4. If bytewise byval transport removes typed pointer alignment
+        // checks.
+        //    A C type's alignment promise is not a runtime proof under GIMSO:
+        //    stage into our own aligned allocation before packet demotion.
         Address Addr = I->hasLValue()
                            ? I->getKnownLValue().getAddress()
                            : I->getKnownRValue().getAggregateAddress();
@@ -5325,7 +5316,9 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
                     TD->getAllocaAddrSpace()) &&
                "indirect argument must be in alloca address space");
 
-        bool NeedCopy = false;
+        bool NeedCopy = ArgInfo.getIndirectByVal() &&
+                        getTypes().ConvertTypeForByVal(I->Ty) !=
+                            getTypes().ConvertTypeForMem(I->Ty);
         if (Addr.getAlignment() < Align &&
             llvm::getOrEnforceKnownAlignment(Addr.emitRawPointer(*this),
                                              Align.getAsAlign(),

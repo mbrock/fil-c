@@ -17,8 +17,8 @@ struct First first(struct First value) { return value; }
 // CHECK: ret
 struct Last last(struct Last value) { return value; }
 
-// Aggregate alternatives can hide pointers in LLVM storage. Small aligned
-// objects still use pointer carriers for precisely the capability-bearing words.
+// Aggregate alternatives can hide pointers in LLVM storage. Normalization
+// exposes every full word in a pointer-bearing union to the ABI.
 struct Hidden { union { long integer; void *pointers[1]; } value; long tag; };
 struct Wide { union { void *pointer; void *pointers[2]; } value; };
 struct Large { union { void *pointer; __int128 integer; } value; };
@@ -35,14 +35,14 @@ struct Hidden hidden(struct Hidden value) { return value; }
 // CHECK: ret
 struct Wide wide(struct Wide value) { return value; }
 
-// CHECK-LABEL: define { i1, %filc_flight_ptr, i64 } @pizlonatedFIP{{[1-9][0-9]*}}_large(
+// CHECK-LABEL: define { i1, %filc_flight_ptr, %filc_flight_ptr } @pizlonatedFIP{{[1-9][0-9]*}}_large(
 // CHECK-NOT: @filc_promote_already_checked_stack_to_heap_without_exiting(
 // CHECK: ret
 struct Large large(struct Large value) { return value; }
 
 union LastWord { long bits[2]; struct { long tag; void *pointer; } value; };
-// CHECK-LABEL: define { i1, i64, %filc_flight_ptr } @pizlonatedFIP{{[1-9][0-9]*}}_last_word(
-// CHECK-SAME: i64 {{.*}}, %filc_flight_ptr
+// CHECK-LABEL: define { i1, %filc_flight_ptr, %filc_flight_ptr } @pizlonatedFIP{{[1-9][0-9]*}}_last_word(
+// CHECK-SAME: %filc_flight_ptr {{.*}}, %filc_flight_ptr
 union LastWord last_word(union LastWord value) { return value; }
 
 union Mixed { struct { void *pointer; double number; } value; double numbers[2]; };
@@ -61,6 +61,16 @@ union Oversized { void *pointer; long words[3]; };
 union Oversized oversized(union Oversized value) { return value; }
 
 union __attribute__((packed)) UnderAligned { void *pointer; long integer; };
-// CHECK-LABEL: define {{.*}} @pizlonatedFIP0_under_aligned(
-// CHECK: call {{.*}} @filc_promote_already_checked_stack_to_heap_without_exiting(
+// CHECK-LABEL: define { i1, %filc_flight_ptr } @pizlonatedFIP{{[1-9][0-9]*}}_under_aligned(
+// CHECK-NOT: @filc_promote_already_checked_stack_to_heap_without_exiting(
+// CHECK: ret
 union UnderAligned under_aligned(union UnderAligned value) { return value; }
+
+// Internal misalignment differs from a weakly aligned base: here the actual
+// pointer lies at byte 8, but normalized storage's pointer word lies at byte 1.
+struct __attribute__((packed)) Payload { char prefix[7]; int *pointer; };
+union __attribute__((packed)) Shifted { struct Payload payload; char bytes[15]; };
+struct __attribute__((aligned(8))) Wrapper { char tag; union Shifted choice; };
+// CHECK-LABEL: define {{.*}} @pizlonatedFIP0_shifted(
+// CHECK: call {{.*}} @filc_promote_already_checked_stack_to_heap_without_exiting(
+struct Wrapper shifted(struct Wrapper value) { return value; }

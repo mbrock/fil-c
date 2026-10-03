@@ -24,3 +24,24 @@ union Hidden read_volatile(volatile struct Packed *p) { return take(p->value); }
 // POST-NOT: call {{.*}} @zmemmove_builtin_volatile(
 // POST: call void @filc_memmove(
 // POST-NOT: call {{.*}} @zmemmove_builtin_volatile(
+
+struct __attribute__((packed)) Payload { char prefix[7]; int *pointer; };
+union __attribute__((packed)) Shifted { struct Payload payload; char bytes[15]; };
+struct __attribute__((aligned(8))) Wrapper { char tag; union Shifted choice; };
+extern int take_shifted(struct Wrapper);
+extern int take_unnamed(int tag, ...);
+
+// Even a naturally aligned C pointer parameter can be supplied by a bad cast.
+// Byte descriptors remove typed alignment checks, so both named and unnamed
+// calls must stage through our own aligned object before packet demotion.
+// PRE-LABEL: define {{.*}} @forward_shifted(
+// PRE: %[[NAMED:[^ ]+]] = alloca %struct.Wrapper, align 8
+// PRE: call void @zmemmove_builtin(ptr {{.*}}%[[NAMED]], ptr %value, i64 16)
+// PRE: call i32 @take_shifted(ptr {{.*}}byval([16 x i8]) align 8 %[[NAMED]])
+int forward_shifted(const struct Wrapper *value) { return take_shifted(*value); }
+
+// PRE-LABEL: define {{.*}} @forward_unnamed(
+// PRE: %[[UNNAMED:[^ ]+]] = alloca %struct.Wrapper, align 8
+// PRE: call void @zmemmove_builtin(ptr {{.*}}%[[UNNAMED]], ptr %value, i64 16)
+// PRE: call i32 (i32, ...) @take_unnamed(i32 0, ptr {{.*}}byval([16 x i8]) align 8 %[[UNNAMED]])
+int forward_unnamed(const struct Wrapper *value) { return take_unnamed(0, *value); }

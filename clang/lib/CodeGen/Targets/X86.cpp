@@ -2445,7 +2445,6 @@ GetSSETypeAtOffset(llvm::Type *IRType, unsigned IROffset,
   return llvm::Type::getDoubleTy(getVMContext());
 }
 
-
 /// GetINTEGERTypeAtOffset - The ABI specifies that a value should be passed in
 /// an 8-byte GPR.  This means that we either have a scalar or we are talking
 /// about the high or low part of an up-to-16-byte struct.  This routine picks
@@ -2460,18 +2459,10 @@ GetSSETypeAtOffset(llvm::Type *IRType, unsigned IROffset,
 /// SourceTy is the source-level type for the entire argument.  SourceOffset is
 /// an offset into this that we're processing (which is always either 0 or 8).
 ///
-static std::optional<unsigned> getFilCPointerWords(QualType Ty,
-                                                 CodeGenTypes &CGT);
-
-llvm::Type *X86_64ABIInfo::
-GetINTEGERTypeAtOffset(llvm::Type *IRType, unsigned IROffset,
-                       QualType SourceTy, unsigned SourceOffset) const {
-  // The chosen storage of a union can hide pointers in other alternatives.
-  // Select the carrier from the complete declared object, not that storage.
-  if (auto Words = getFilCPointerWords(SourceTy, CGT))
-    if (*Words & (1U << (SourceOffset / 8)))
-      return llvm::PointerType::get(getVMContext(), 0);
-
+llvm::Type *X86_64ABIInfo::GetINTEGERTypeAtOffset(llvm::Type *IRType,
+                                                  unsigned IROffset,
+                                                  QualType SourceTy,
+                                                  unsigned SourceOffset) const {
   // If we're dealing with an un-offset LLVM IR type, then it means that we're
   // returning an 8-byte unit starting with it.  See if we can safely use it.
   if (IROffset == 0) {
@@ -2531,7 +2522,6 @@ GetINTEGERTypeAtOffset(llvm::Type *IRType, unsigned IROffset,
                                 std::min(TySizeInBytes-SourceOffset, 8U)*8);
 }
 
-
 /// GetX86_64ByValArgumentPair - Given a high and low type that can ideally
 /// be used as elements of a two register pair to pass or return, return a
 /// first class aggregate to represent them.  For example, if the low part of
@@ -2576,103 +2566,13 @@ GetX86_64ByValArgumentPair(llvm::Type *Lo, llvm::Type *Hi,
   return Result;
 }
 
-// Describe only complete, aligned pointer words of small objects. nullopt is
-// an unsupported layout, not a pointer-free object. Object storage remains
-// unchanged; only the named-argument/result ABI uses these carriers.
-static bool collectFilCPointerWords(llvm::Type *Ty, uint64_t Offset,
-                                   uint64_t Size, unsigned &Words,
-                                   const llvm::DataLayout &DL) {
-  if (Ty->isPointerTy()) {
-    if (DL.getTypeAllocSize(Ty) != 8 || Offset % 8 || Offset + 8 > Size)
-      return false;
-    Words |= 1U << (Offset / 8);
-    return true;
-  }
-  if (auto *ST = dyn_cast<llvm::StructType>(Ty)) {
-    const auto *Layout = DL.getStructLayout(ST);
-    for (unsigned I = 0; I < ST->getNumElements(); ++I)
-      if (!collectFilCPointerWords(ST->getElementType(I),
-                                  Offset + Layout->getElementOffset(I), Size,
-                                  Words, DL))
-        return false;
-  } else if (auto *AT = dyn_cast<llvm::ArrayType>(Ty)) {
-    uint64_t Stride = DL.getTypeAllocSize(AT->getElementType());
-    for (uint64_t I = 0; I < AT->getNumElements(); ++I)
-      if (!collectFilCPointerWords(AT->getElementType(), Offset + I * Stride,
-                                  Size, Words, DL))
-        return false;
-  } else if (Ty->isVectorTy() && CodeGenTypes::hasPointerRepresentation(Ty))
-    return false;
-  return true;
-}
-
-static bool collectFilCPointerWords(QualType Ty, uint64_t Offset,
-                                   uint64_t Size, unsigned &Words,
-                                   CodeGenTypes &CGT) {
-  ASTContext &Context = CGT.getContext();
-  if (!CGT.hasPointerRepresentation(Ty))
-    return true;
-  if (const auto *AT = Context.getAsArrayType(Ty)) {
-    // Incomplete/flexible tails are not part of the by-value object.
-    if (const auto *CAT = dyn_cast<ConstantArrayType>(AT)) {
-      uint64_t Stride =
-          Context.getTypeSizeInChars(AT->getElementType()).getQuantity();
-      for (uint64_t I = 0; I < CAT->getSize().getZExtValue(); ++I)
-        if (!collectFilCPointerWords(AT->getElementType(), Offset + I * Stride,
-                                    Size, Words, CGT))
-          return false;
-    }
-    return true;
-  }
-  const RecordType *RT = Ty->getAs<RecordType>();
-  if (!RT)
-    return collectFilCPointerWords(CGT.ConvertTypeForMem(Ty), Offset, Size,
-                                  Words, CGT.getDataLayout());
-  const RecordDecl *RD = RT->getDecl();
-  if (Context.getTypeAlignInChars(Ty) < CharUnits::fromQuantity(8))
-    return false;
-  if (RD->isUnion() && !CGT.isZeroInitializable(RD))
-    return false;
-  const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
-  if (const auto *CXXRD = dyn_cast<CXXRecordDecl>(RD)) {
-    if (CXXRD->isDynamicClass())
-      return false;
-    for (const CXXBaseSpecifier &Base : CXXRD->bases()) {
-      const auto *BaseDecl = Base.getType()->getAsCXXRecordDecl();
-      uint64_t BaseOffset = Layout.getBaseClassOffset(BaseDecl).getQuantity();
-      if (!collectFilCPointerWords(Base.getType(), Offset + BaseOffset, Size,
-                                  Words, CGT))
-        return false;
-    }
-  }
-  unsigned I = 0;
-  for (const FieldDecl *Field : RD->fields()) {
-    uint64_t FieldOffset =
-        Context.toCharUnitsFromBits(Layout.getFieldOffset(I++)).getQuantity();
-    if (!collectFilCPointerWords(Field->getType(), Offset + FieldOffset, Size,
-                                Words, CGT))
-      return false;
-  }
-  return true;
-}
-
-static std::optional<unsigned> getFilCPointerWords(QualType Ty,
-                                                 CodeGenTypes &CGT) {
-  if (!Ty->isRecordType() && !Ty->isArrayType())
-    return 0;
-  if (!CGT.hasPointerRepresentation(Ty))
-    return 0;
-  uint64_t Size = CGT.getContext().getTypeSizeInChars(Ty).getQuantity();
-  if (Size > 16)
-    return std::nullopt;
-  unsigned Words = 0;
-  if (!collectFilCPointerWords(Ty, 0, Size, Words, CGT))
-    return std::nullopt;
-  return Words;
-}
-
 ABIArgInfo X86_64ABIInfo::classifyReturnType(QualType RetTy) const {
-  if (!getFilCPointerWords(RetTy, CGT).has_value())
+  // A nested packed union may have synthetic pointer words shifted relative
+  // to the enclosing object's eightbytes, even when an actual pointer member
+  // is aligned. Integer coercion of those words would discard its capability.
+  if (CodeGenTypes::hasUnalignedPointers(CGT.ConvertTypeForMem(RetTy),
+                                         CharUnits::fromQuantity(8),
+                                         getDataLayout()))
     return getIndirectReturnResult(RetTy);
 
   // AMD64-ABI 3.2.3p4: Rule 1. Classify the return type with the
@@ -2811,17 +2711,27 @@ X86_64ABIInfo::classifyArgumentType(QualType Ty, unsigned freeIntRegs,
   if (!isNamedArg && isAggregateTypeForABI(Ty) &&
       !getRecordArgABI(Ty, getCXXABI())) {
     neededInt = neededSSE = 0;
-    return getNaturalAlignIndirect(Ty, /*ByVal=*/true);
+    // The packet demoter requires a word-aligned source even for an odd-sized
+    // object. This also makes CGCall stage packed subobjects when necessary.
+    ABIArgInfo AI = getNaturalAlignIndirect(Ty, /*ByVal=*/true);
+    AI.setIndirectAlign(
+        std::max(AI.getIndirectAlign(), CharUnits::fromQuantity(8)));
+    return AI;
   }
 
   Ty = useFirstFieldIfTransparentUnion(Ty);
 
   X86_64ABIInfo::Class Lo, Hi;
-  if (!getFilCPointerWords(Ty, CGT).has_value()) {
+  // Test internal offsets assuming an aligned base, not the declared alignment.
+  // A standalone packed union can still use aligned pointer ABI carriers.
+  if (CodeGenTypes::hasUnalignedPointers(CGT.ConvertTypeForMem(Ty),
+                                         CharUnits::fromQuantity(8),
+                                         getDataLayout())) {
     Lo = Memory;
     Hi = NoClass;
-  } else
+  } else {
     classify(Ty, 0, Lo, Hi, isNamedArg, IsRegCall);
+  }
 
   // Check some invariants.
   // FIXME: Enforce these by construction.
@@ -3135,10 +3045,11 @@ RValue X86_64ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
                                 QualType Ty, AggValueSlot Slot) const {
   if (isAggregateTypeForABI(Ty) && !getRecordArgABI(Ty, getCXXABI())) {
     llvm::Type *Storage = CGF.ConvertTypeForMem(Ty);
+    llvm::Type *Transport = CGT.ConvertTypeForByVal(Ty);
     const llvm::DataLayout &DL = CGT.getDataLayout();
-    uint64_t Size = DL.getTypeAllocSize(Storage);
+    uint64_t Size = DL.getTypeAllocSize(Transport);
     uint64_t PacketAlignment =
-        std::max<uint64_t>(8, DL.getABITypeAlign(Storage).value());
+        std::max<uint64_t>(8, DL.getABITypeAlign(Transport).value());
     llvm::Value *Ptr = CGF.Builder.CreateCall(
         CGF.CGM.getIntrinsic(llvm::Intrinsic::filc_va_arg_address),
         {VAListAddr.emitRawPointer(CGF),

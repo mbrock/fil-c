@@ -2590,6 +2590,46 @@ static llvm::Constant *EmitNullConstantForBase(CodeGenModule &CGM,
                                                llvm::Type *baseType,
                                                const CXXRecordDecl *base);
 
+// Null initialization has no address relocations to preserve. Keep its data
+// pointer-free even when object storage contains synthetic pointer words:
+// globals and TLS may otherwise initialize an unaligned word with a shadow
+// pointer store. This is deliberately not a converter for arbitrary constants.
+static llvm::Constant *emitAddressFreeNullConstant(CodeGenModule &CGM,
+                                                   llvm::Constant *C) {
+  llvm::Type *Ty = C->getType();
+  if (!CodeGenTypes::hasPointerRepresentation(Ty))
+    return C;
+  const llvm::DataLayout &DL = CGM.getDataLayout();
+  if (C->isNullValue())
+    return llvm::Constant::getNullValue(
+        llvm::ArrayType::get(CGM.Int8Ty, DL.getTypeAllocSize(Ty)));
+
+  ConstantAggregateBuilder Builder(CGM);
+  if (auto *ST = dyn_cast<llvm::StructType>(Ty)) {
+    const llvm::StructLayout *Layout = DL.getStructLayout(ST);
+    for (unsigned I = 0; I < ST->getNumElements(); ++I) {
+      bool Added = Builder.add(
+          emitAddressFreeNullConstant(CGM, C->getAggregateElement(I)),
+          CharUnits::fromQuantity(Layout->getElementOffset(I)), false);
+      assert(Added && "Cannot lay out null initializer");
+      (void)Added;
+    }
+  } else if (auto *AT = dyn_cast<llvm::ArrayType>(Ty)) {
+    CharUnits Stride =
+        CharUnits::fromQuantity(DL.getTypeAllocSize(AT->getElementType()));
+    for (uint64_t I = 0; I < AT->getNumElements(); ++I) {
+      bool Added = Builder.add(
+          emitAddressFreeNullConstant(CGM, C->getAggregateElement(I)),
+          Stride * I, false);
+      assert(Added && "Cannot lay out null initializer");
+      (void)Added;
+    }
+  } else {
+    llvm_unreachable("Unexpected address in null initializer");
+  }
+  return Builder.build(Ty, /*AllowOversized=*/false);
+}
+
 static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
                                         const RecordDecl *record,
                                         bool asCompleteObject) {
@@ -2597,6 +2637,30 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
   llvm::StructType *structure =
     (asCompleteObject ? layout.getLLVMType()
                       : layout.getBaseSubobjectLLVMType());
+
+  if (layout.hasPointerWordStorage()) {
+    ConstantAggregateBuilder Builder(CGM);
+    // Initialize the first named member, including an anonymous aggregate
+    // containing named members. Let Clang's existing null emitter handle that
+    // member's arrays, bases, nested unions, and ABI-specific member pointers.
+    for (const FieldDecl *Field : record->fields()) {
+      const RecordDecl *FieldRecord = Field->getType()->getAsRecordDecl();
+      if (!Field->getIdentifier() &&
+          (!FieldRecord || !FieldRecord->findFirstNamedDataMember()))
+        continue;
+      if (!Field->isBitField() &&
+          !isEmptyFieldForLayout(CGM.getContext(), Field)) {
+        bool Added =
+            Builder.add(emitAddressFreeNullConstant(
+                            CGM, CGM.EmitNullConstant(Field->getType())),
+                        CharUnits::Zero(), false);
+        assert(Added && "Cannot lay out union null initializer");
+        (void)Added;
+      }
+      break;
+    }
+    return Builder.build(structure, /*AllowOversized=*/false);
+  }
 
   unsigned numElements = structure->getNumElements();
   std::vector<llvm::Constant *> elements(numElements);
@@ -2674,7 +2738,18 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
       elements[i] = llvm::Constant::getNullValue(structure->getElementType(i));
   }
 
-  return llvm::ConstantStruct::get(structure, elements);
+  // A normalized union's null initializer may use integer/byte storage instead
+  // of its object type. Preserve the containing record's exact byte offsets.
+  ConstantAggregateBuilder Builder(CGM);
+  const llvm::StructLayout *SL = CGM.getDataLayout().getStructLayout(structure);
+  for (unsigned I = 0; I < numElements; ++I) {
+    bool Added =
+        Builder.add(emitAddressFreeNullConstant(CGM, elements[I]),
+                    CharUnits::fromQuantity(SL->getElementOffset(I)), false);
+    assert(Added && "Cannot lay out record null initializer");
+    (void)Added;
+  }
+  return Builder.build(structure, /*AllowOversized=*/false);
 }
 
 /// Emit the null constant for a base subobject.
@@ -2714,7 +2789,8 @@ llvm::Constant *CodeGenModule::EmitNullConstant(QualType T) {
       ConstantEmitter::emitNullForMemory(*this, ElementTy);
     unsigned NumElements = CAT->getZExtSize();
     SmallVector<llvm::Constant *, 8> Array(NumElements, Element);
-    return llvm::ConstantArray::get(ATy, Array);
+    return EmitArrayConstant(*this, ATy, Element->getType(), NumElements, Array,
+                             Element);
   }
 
   if (const RecordType *RT = T->getAs<RecordType>())

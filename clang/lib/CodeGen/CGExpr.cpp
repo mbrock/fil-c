@@ -125,6 +125,38 @@ RawAddress CodeGenFunction::CreateTempAlloca(llvm::Type *Ty, CharUnits Align,
   return RawAddress(V, Ty, Align, KnownNonNull);
 }
 
+llvm::CallInst *CGBuilderTy::CreateMemCpy(Address Dest, Address Src,
+                                          llvm::Value *Size, bool IsVolatile) {
+  const llvm::DataLayout &DL = GetInsertBlock()->getDataLayout();
+  // Early LLVM optimization may split memcpy into typed pointer accesses.
+  // Keep copies opaque when either object has an unaligned pointer word,
+  // including words at nested packed offsets or an odd array stride.
+  if (getCGF() && (CodeGenTypes::hasUnalignedPointers(
+                       Dest.getElementType(), Dest.getAlignment(), DL) ||
+                   CodeGenTypes::hasUnalignedPointers(
+                       Src.getElementType(), Src.getAlignment(), DL))) {
+    return CreateOpaqueMemCpy(Dest, Src, Size, IsVolatile);
+  }
+  return CGBuilderBaseTy::CreateMemCpy(
+      emitRawPointerFromAddress(Dest), Dest.getAlignment().getAsAlign(),
+      emitRawPointerFromAddress(Src), Src.getAlignment().getAsAlign(), Size,
+      IsVolatile);
+}
+
+llvm::CallInst *CGBuilderTy::CreateOpaqueMemCpy(Address Dest, Address Src,
+                                                llvm::Value *Size,
+                                                bool IsVolatile) {
+  CodeGenModule &CGM = getCGF()->CGM;
+  return CreateCall(
+      CGM.CreateRuntimeFunction(
+          llvm::FunctionType::get(
+              TypeCache.VoidTy,
+              {TypeCache.Int8PtrTy, TypeCache.Int8PtrTy, TypeCache.SizeTy},
+              false),
+          IsVolatile ? "zmemmove_builtin_volatile" : "zmemmove_builtin"),
+      {Dest.emitRawPointer(*getCGF()), Src.emitRawPointer(*getCGF()), Size});
+}
+
 /// CreateTempAlloca - This creates an alloca and inserts it into the entry
 /// block if \p ArraySize is nullptr, otherwise inserts it at the current
 /// insertion point of the builder.
@@ -523,7 +555,7 @@ EmitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *M) {
       if (Var->hasInitializer())
         return MakeAddrLValue(Object, M->getType(), AlignmentSource::Decl);
 
-      Var->setInitializer(CGM.EmitNullConstant(E->getType()));
+      Var->replaceInitializer(CGM.EmitNullConstant(E->getType()));
     }
     LValue RefTempDst = MakeAddrLValue(Object, M->getType(),
                                        AlignmentSource::Decl);
@@ -573,7 +605,9 @@ EmitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *M) {
     // constant temporary that we promoted to a global, we may have already
     // initialized it.
     if (!Var->hasInitializer()) {
-      Var->setInitializer(CGM.EmitNullConstant(E->getType()));
+      // A union's initializer may have different LLVM storage with the same
+      // byte layout. Object keeps the declared access type independently.
+      Var->replaceInitializer(CGM.EmitNullConstant(E->getType()));
       EmitAnyExprToMem(E, Object, Qualifiers(), /*IsInit*/true);
     }
   } else {

@@ -222,6 +222,7 @@ struct CGRecordLowering {
   llvm::DenseMap<const CXXRecordDecl *, unsigned> VirtualBases;
   bool IsZeroInitializable : 1;
   bool IsZeroInitializableAsBase : 1;
+  bool HasPointerWordStorage : 1;
   bool Packed : 1;
 private:
   CGRecordLowering(const CGRecordLowering &) = delete;
@@ -235,7 +236,8 @@ CGRecordLowering::CGRecordLowering(CodeGenTypes &Types, const RecordDecl *D,
       RD(dyn_cast<CXXRecordDecl>(D)),
       Layout(Types.getContext().getASTRecordLayout(D)),
       DataLayout(Types.getDataLayout()), IsZeroInitializable(true),
-      IsZeroInitializableAsBase(true), Packed(Packed) {}
+      IsZeroInitializableAsBase(true), HasPointerWordStorage(false),
+      Packed(Packed) {}
 
 void CGRecordLowering::setBitFieldInfo(
     const FieldDecl *FD, CharUnits StartOffset, llvm::Type *StorageType) {
@@ -358,6 +360,24 @@ void CGRecordLowering::lowerUnion(bool isNonVirtualBaseType) {
          getSize(FieldType) > getSize(StorageType)) ||
         (!StorageType->isPointerTy() && FieldType->isPointerTy()))
       StorageType = FieldType;
+  }
+  // Make all pointer alternatives visible to aggregate copies and the ABI,
+  // including pointers hidden by the ordinary storage-field heuristic. Keep
+  // the AST byte layout exact: packed unions may have a partial final word.
+  if (Types.hasPointerRepresentation(Context.getRecordType(D))) {
+    llvm::Type *Pointer = llvm::PointerType::get(Types.getLLVMContext(), 0);
+    CharUnits WordSize =
+        CharUnits::fromQuantity(DataLayout.getTypeAllocSize(Pointer));
+    SmallVector<llvm::Type *, 2> Words;
+    if (uint64_t Count = LayoutSize / WordSize)
+      Words.push_back(llvm::ArrayType::get(Pointer, Count));
+    CharUnits Remaining = CharUnits::fromQuantity(LayoutSize % WordSize);
+    if (!Remaining.isZero())
+      Words.push_back(getByteArrayType(Remaining));
+    StorageType = llvm::StructType::get(Types.getLLVMContext(), Words,
+                                        /*isPacked=*/true);
+    HasPointerWordStorage = true;
+    assert(getSize(StorageType) == LayoutSize && "Union storage changed size");
   }
   // If we have no storage type just pad to the appropriate size and return.
   if (!StorageType)
@@ -1114,7 +1134,8 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
 
   auto RL = std::make_unique<CGRecordLayout>(
       Ty, BaseTy, (bool)Builder.IsZeroInitializable,
-      (bool)Builder.IsZeroInitializableAsBase);
+      (bool)Builder.IsZeroInitializableAsBase,
+      (bool)Builder.HasPointerWordStorage);
 
   RL->NonVirtualBases.swap(Builder.NonVirtualBases);
   RL->CompleteObjectVirtualBases.swap(Builder.VirtualBases);

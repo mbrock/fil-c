@@ -122,6 +122,10 @@ public:
   /// memory representation is usually i8 or i32, depending on the target.
   llvm::Type *ConvertTypeForMem(QualType T);
 
+  /// The byval transport descriptor may be pointer-free when synthetic union
+  /// words are internally unaligned. Object accesses still use the memory type.
+  llvm::Type *ConvertTypeForByVal(QualType T);
+
   /// Check whether the given type needs to be laid out in memory
   /// using an opaque byte-array type because its load/store type
   /// does not have the correct alloc size in the LLVM data layout.
@@ -305,6 +309,11 @@ public:  // These are internal details of CGT that shouldn't be used externally.
   /// not represented by its selected LLVM storage type.
   bool hasPointerRepresentation(QualType T);
   static bool hasPointerRepresentation(llvm::Type *T);
+
+  /// Whether any pointer leaf may be unaligned, including nested offsets and
+  /// array strides. An aligned aggregate base alone is not sufficient.
+  static bool hasUnalignedPointers(llvm::Type *T, CharUnits Alignment,
+                                   const llvm::DataLayout &DL);
 
   /// Check if the pointer type can be zero-initialized (in the C++ sense)
   /// with an LLVM zeroinitializer.

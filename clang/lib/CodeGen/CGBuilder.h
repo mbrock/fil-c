@@ -363,19 +363,17 @@ public:
 
   using CGBuilderBaseTy::CreateMemCpy;
   llvm::CallInst *CreateMemCpy(Address Dest, Address Src, llvm::Value *Size,
-                               bool IsVolatile = false) {
-    llvm::Value *DestPtr = emitRawPointerFromAddress(Dest);
-    llvm::Value *SrcPtr = emitRawPointerFromAddress(Src);
-    return CreateMemCpy(DestPtr, Dest.getAlignment().getAsAlign(), SrcPtr,
-                        Src.getAlignment().getAsAlign(), Size, IsVolatile);
-  }
+                               bool IsVolatile = false);
   llvm::CallInst *CreateMemCpy(Address Dest, Address Src, uint64_t Size,
                                bool IsVolatile = false) {
-    llvm::Value *DestPtr = emitRawPointerFromAddress(Dest);
-    llvm::Value *SrcPtr = emitRawPointerFromAddress(Src);
-    return CreateMemCpy(DestPtr, Dest.getAlignment().getAsAlign(), SrcPtr,
-                        Src.getAlignment().getAsAlign(), Size, IsVolatile);
+    return CreateMemCpy(Dest, Src, getSize(Size), IsVolatile);
   }
+
+  /// Preserve this bytewise copy until FilPizlonator, without early LLVM
+  /// scalarization into potentially unaligned pointer loads and stores.
+  llvm::CallInst *CreateOpaqueMemCpy(Address Dest, Address Src,
+                                     llvm::Value *Size,
+                                     bool IsVolatile = false);
 
   using CGBuilderBaseTy::CreateMemCpyInline;
   llvm::CallInst *CreateMemCpyInline(Address Dest, Address Src, uint64_t Size) {

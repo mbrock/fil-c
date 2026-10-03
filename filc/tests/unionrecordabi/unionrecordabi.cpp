@@ -10,8 +10,8 @@ int main() {
   d.tag = 73;
   d = inherited(d);
   assert(d.tag == 73 && *d.u.p == 42);
-  // Nonzero-null initialization must keep its original representation and
-  // memory ABI; declaring another pointer alternative cannot change null.
+  // Nonzero-null initialization must keep its original representation;
+  // declaring another pointer alternative cannot change null.
   Nonzero null = { nullptr };
   null = nonzero(null);
   assert(null.member == nullptr);
@@ -22,7 +22,7 @@ int main() {
   Nested inside = { 97, n };
   inside = nested(inside);
   assert(inside.tag == 97 && *inside.value.pointer == 42);
-  // Unsupported nested alternatives retain the memory fallback, even when
+  // Normalization also finds pointers in nested union alternatives, even when
   // the outer union's first member itself is zero-initializable.
   Outer outside;
   outside.value.pointer = &x;
