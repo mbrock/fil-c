@@ -1,82 +1,57 @@
 #include "unionstoragecopy.h"
-
 #include <stdarg.h>
 
-OddPointerUnion union_round_trip(OddPointerUnion value)
+/* An integer/FP observation must not make SROA integerize the copies around it.
+ * The separately compiled caller verifies the shadow capability by dereference. */
+void copy_observed(Choice *out, const Choice *in)
 {
-    return value;
+    Choice temporary = *in;
+    observe(temporary.bits);
+    *out = temporary;
 }
 
-NaturalPointerUnion natural_pointer_round_trip(NaturalPointerUnion value)
+void copy_number_observed(Choice *out, const Choice *in)
 {
-    return value;
+    Choice temporary = *in;
+    observe_number(temporary.number);
+    *out = temporary;
 }
 
-int exhausted_registers(long a, long b, long c, long d, long e, long f,
-                        NaturalPointerUnion value)
+void copy_written(Choice *out, const Choice *in, int byte_write)
 {
-    return a == 1 && b == 2 && c == 3 && d == 4 && e == 5 && f == 6 &&
-        *(int *)value.pointer == 97;
+    Choice temporary = *in;
+    if (byte_write)
+        temporary.bytes[0] = in->bytes[0];
+    else
+        temporary.bits = in->bits;
+    *out = temporary;
 }
 
-Wrapper shifted_round_trip(Wrapper value)
+void copy_bytes(Bytes *out, const Bytes *in)
 {
-    return value;
+    Bytes temporary = *in;
+    observe(temporary.bits);
+    *out = temporary;
 }
 
-int shifted_argument(Wrapper value)
+void copy_chain(Choice *out, const Choice *in)
 {
-    return value.tag == 0x39 && *value.choice.payload.pointer == 97;
+    Choice first = *in;
+    Choice second = first;
+    observe(second.bits);
+    *out = second;
 }
 
-__attribute__((noinline)) int consume_tag(Wrapper value)
-{
-    return value.tag;
-}
+Choice round_trip(Choice value) { return value; }
 
-int forwarded_tag(const Wrapper *value)
-{
-    return consume_tag(*value);
-}
-
-__attribute__((noinline)) int consume_varargs_tag(int tag, ...)
+int check_varargs(int tag, ...)
 {
     va_list args;
     va_start(args, tag);
-    Wrapper value = va_arg(args, Wrapper);
-    va_end(args);
-    return value.tag;
-}
-
-int forwarded_varargs_tag(const Wrapper *value)
-{
-    return consume_varargs_tag(0, *value);
-}
-
-int union_varargs_check(int tag, ...)
-{
-    va_list args;
-    va_start(args, tag);
-    OddPointerUnion value = va_arg(args, OddPointerUnion);
-    int first = va_arg(args, int);
-    unsigned long long second = va_arg(args, unsigned long long);
-    double third = va_arg(args, double);
-    va_end(args);
-
-    return tag == 0x1357 && value.bytes[0] == 0x91 &&
-        value.bytes[8] == 0xe7 && first == 0x2468 &&
-        second == 0x1020304050607080ULL && third == 19.75;
-}
-
-int wide_varargs_check(int tag, ...)
-{
-    va_list args;
-    va_start(args, tag);
-    WideWrapper value = va_arg(args, WideWrapper);
-    int first = va_arg(args, int);
+    Choice value = va_arg(args, Choice);
+    long first = va_arg(args, long);
     double second = va_arg(args, double);
     va_end(args);
-    return tag == 0x1357 && shifted_argument(value.shifted) &&
-        value.stamp == (((__int128)0x1020304050607080ULL << 64) | 0x9173) &&
-        first == 0x2468 && second == 19.75;
+    return tag == 17 && *value.pointer == 97 && first == 0x123456789L &&
+        second == -19.75;
 }

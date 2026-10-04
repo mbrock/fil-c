@@ -365,6 +365,16 @@ void CGRecordLowering::lowerUnion(bool isNonVirtualBaseType) {
   // including pointers hidden by the ordinary storage-field heuristic. Keep
   // the AST byte layout exact: packed unions may have a partial final word.
   if (Types.hasPointerRepresentation(Context.getRecordType(D))) {
+    // Synthetic pointer words must agree with every alternative's pointer
+    // alignment. In particular, an aligned outer union does not repair a
+    // packed member with a pointer at byte 1. Reject rather than introducing
+    // a second, pointer-free transport representation for such layouts.
+    for (const FieldDecl *Field : D->fields())
+      if (!Field->isBitField() &&
+          CodeGenTypes::hasUnalignedPointers(getStorageType(Field),
+                                             Layout.getAlignment(), DataLayout))
+        Types.getCGM().ErrorUnsupported(Field,
+                                        "unaligned pointer-bearing union");
     llvm::Type *Pointer = llvm::PointerType::get(Types.getLLVMContext(), 0);
     CharUnits WordSize =
         CharUnits::fromQuantity(DataLayout.getTypeAllocSize(Pointer));
@@ -1131,6 +1141,17 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
   // signifies that the type is no longer opaque and record layout is complete,
   // but we may need to recursively layout D while laying D out as a base type.
   Ty->setBody(Builder.FieldTypes, Builder.Packed);
+
+  // Check effective offsets and array strides, not just the packed attribute.
+  // This deliberately restricts union-containing records; ordinary packed
+  // records keep their existing checked pointer-access behavior.
+  QualType RecordTy = getContext().getRecordType(D);
+  if (RecordTy.hasUnion()) {
+    CharUnits Alignment = getContext().getASTRecordLayout(D).getAlignment();
+    if (hasUnalignedPointers(Ty, Alignment, getDataLayout()) ||
+        (BaseTy && hasUnalignedPointers(BaseTy, Alignment, getDataLayout())))
+      CGM.ErrorUnsupported(D, "unaligned pointer-bearing union storage");
+  }
 
   auto RL = std::make_unique<CGRecordLayout>(
       Ty, BaseTy, (bool)Builder.IsZeroInitializable,

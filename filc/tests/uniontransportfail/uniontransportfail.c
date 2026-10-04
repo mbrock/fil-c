@@ -1,26 +1,17 @@
-/* A pointer-free byval descriptor is still a checked whole-object read. It
- * must not let the caller snapshot 16 bytes from an 8-byte allocation. */
-struct __attribute__((packed)) Payload {
-    unsigned char prefix[7];
+/* Whole-object byval checks must not snapshot a larger union from a short
+ * allocation. The typed descriptor also retains pointer-alignment checks. */
+union Choice {
     int *pointer;
+    unsigned long words[3];
 };
-union __attribute__((packed)) Choice {
-    struct Payload payload;
-    unsigned char bytes[15];
-};
-struct __attribute__((aligned(8))) Wrapper {
-    unsigned char tag;
-    union Choice choice;
-};
-_Static_assert(sizeof(struct Wrapper) == 16, "transport extent");
 
-__attribute__((noinline)) int consume(struct Wrapper value)
+__attribute__((noinline)) int consume(union Choice value)
 {
-    return *value.choice.payload.pointer;
+    return *value.pointer;
 }
 
 static const unsigned long short_object = 0;
 int main(void)
 {
-    return consume(*(const struct Wrapper *)&short_object);
+    return consume(*(const union Choice *)&short_object);
 }

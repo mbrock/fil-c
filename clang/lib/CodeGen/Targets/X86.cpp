@@ -2567,14 +2567,6 @@ GetX86_64ByValArgumentPair(llvm::Type *Lo, llvm::Type *Hi,
 }
 
 ABIArgInfo X86_64ABIInfo::classifyReturnType(QualType RetTy) const {
-  // A nested packed union may have synthetic pointer words shifted relative
-  // to the enclosing object's eightbytes, even when an actual pointer member
-  // is aligned. Integer coercion of those words would discard its capability.
-  if (CodeGenTypes::hasUnalignedPointers(CGT.ConvertTypeForMem(RetTy),
-                                         CharUnits::fromQuantity(8),
-                                         getDataLayout()))
-    return getIndirectReturnResult(RetTy);
-
   // AMD64-ABI 3.2.3p4: Rule 1. Classify the return type with the
   // classification algorithm.
   X86_64ABIInfo::Class Lo, Hi;
@@ -2722,16 +2714,7 @@ X86_64ABIInfo::classifyArgumentType(QualType Ty, unsigned freeIntRegs,
   Ty = useFirstFieldIfTransparentUnion(Ty);
 
   X86_64ABIInfo::Class Lo, Hi;
-  // Test internal offsets assuming an aligned base, not the declared alignment.
-  // A standalone packed union can still use aligned pointer ABI carriers.
-  if (CodeGenTypes::hasUnalignedPointers(CGT.ConvertTypeForMem(Ty),
-                                         CharUnits::fromQuantity(8),
-                                         getDataLayout())) {
-    Lo = Memory;
-    Hi = NoClass;
-  } else {
-    classify(Ty, 0, Lo, Hi, isNamedArg, IsRegCall);
-  }
+  classify(Ty, 0, Lo, Hi, isNamedArg, IsRegCall);
 
   // Check some invariants.
   // FIXME: Enforce these by construction.
@@ -3045,11 +3028,10 @@ RValue X86_64ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
                                 QualType Ty, AggValueSlot Slot) const {
   if (isAggregateTypeForABI(Ty) && !getRecordArgABI(Ty, getCXXABI())) {
     llvm::Type *Storage = CGF.ConvertTypeForMem(Ty);
-    llvm::Type *Transport = CGT.ConvertTypeForByVal(Ty);
     const llvm::DataLayout &DL = CGT.getDataLayout();
-    uint64_t Size = DL.getTypeAllocSize(Transport);
+    uint64_t Size = DL.getTypeAllocSize(Storage);
     uint64_t PacketAlignment =
-        std::max<uint64_t>(8, DL.getABITypeAlign(Transport).value());
+        std::max<uint64_t>(8, DL.getABITypeAlign(Storage).value());
     llvm::Value *Ptr = CGF.Builder.CreateCall(
         CGF.CGM.getIntrinsic(llvm::Intrinsic::filc_va_arg_address),
         {VAListAddr.emitRawPointer(CGF),

@@ -879,18 +879,6 @@ bool CodeGenTypes::hasUnalignedPointers(llvm::Type *T, CharUnits Alignment,
   return false;
 }
 
-llvm::Type *CodeGenTypes::ConvertTypeForByVal(QualType T) {
-  llvm::Type *Storage = ConvertTypeForMem(T);
-  const llvm::DataLayout &DL = getDataLayout();
-  if (hasUnalignedPointers(Storage,
-                           CharUnits::fromQuantity(DL.getPointerSize()), DL))
-    // byval transports the entire object, including shadow capabilities. Its
-    // access checks must not require alignment at synthetic pointer offsets.
-    return llvm::ArrayType::get(llvm::Type::getInt8Ty(getLLVMContext()),
-                                DL.getTypeAllocSize(Storage));
-  return Storage;
-}
-
 bool CodeGenTypes::hasPointerRepresentation(QualType T) {
   if (const auto *AT = Context.getAsArrayType(T))
     return hasPointerRepresentation(AT->getElementType());

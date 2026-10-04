@@ -122,10 +122,6 @@ public:
   /// memory representation is usually i8 or i32, depending on the target.
   llvm::Type *ConvertTypeForMem(QualType T);
 
-  /// The byval transport descriptor may be pointer-free when synthetic union
-  /// words are internally unaligned. Object accesses still use the memory type.
-  llvm::Type *ConvertTypeForByVal(QualType T);
-
   /// Check whether the given type needs to be laid out in memory
   /// using an opaque byte-array type because its load/store type
   /// does not have the correct alloc size in the LLVM data layout.

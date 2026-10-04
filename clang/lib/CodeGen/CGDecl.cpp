@@ -1173,21 +1173,6 @@ static void emitStoresForConstant(CodeGenModule &CGM, const VarDecl &D,
   if (!ConstantSize)
     return;
 
-  // A normalized union may contain synthetic pointer words at unaligned
-  // packed offsets. Do not split aggregate initialization into pointer stores.
-  // Scalar C pointer initialization still uses its ordinary checked store.
-  if (Ty->isAggregateType() &&
-      CodeGenTypes::hasUnalignedPointers(Ty, Loc.getAlignment(),
-                                         CGM.getDataLayout())) {
-    auto *I = Builder.CreateMemCpy(
-        Loc.withElementType(Ty),
-        CGM.createUnnamedGlobalFrom(D, constant, Loc.getAlignment()),
-        ConstantSize, isVolatile);
-    if (IsAutoInit)
-      I->addAnnotationMetadata("auto-init");
-    return;
-  }
-
   bool canDoSingleStore = Ty->isIntOrIntVectorTy() ||
                           Ty->isPtrOrPtrVectorTy() || Ty->isFPOrFPVectorTy();
   if (canDoSingleStore) {

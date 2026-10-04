@@ -59,18 +59,3 @@ union Oversized { void *pointer; long words[3]; };
 // CHECK-LABEL: define {{.*}} @pizlonatedFIP0_oversized(
 // CHECK: call {{.*}} @filc_promote_already_checked_stack_to_heap_without_exiting(
 union Oversized oversized(union Oversized value) { return value; }
-
-union __attribute__((packed)) UnderAligned { void *pointer; long integer; };
-// CHECK-LABEL: define { i1, %filc_flight_ptr } @pizlonatedFIP{{[1-9][0-9]*}}_under_aligned(
-// CHECK-NOT: @filc_promote_already_checked_stack_to_heap_without_exiting(
-// CHECK: ret
-union UnderAligned under_aligned(union UnderAligned value) { return value; }
-
-// Internal misalignment differs from a weakly aligned base: here the actual
-// pointer lies at byte 8, but normalized storage's pointer word lies at byte 1.
-struct __attribute__((packed)) Payload { char prefix[7]; int *pointer; };
-union __attribute__((packed)) Shifted { struct Payload payload; char bytes[15]; };
-struct __attribute__((aligned(8))) Wrapper { char tag; union Shifted choice; };
-// CHECK-LABEL: define {{.*}} @pizlonatedFIP0_shifted(
-// CHECK: call {{.*}} @filc_promote_already_checked_stack_to_heap_without_exiting(
-struct Wrapper shifted(struct Wrapper value) { return value; }

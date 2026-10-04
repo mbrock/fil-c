@@ -363,17 +363,16 @@ public:
 
   using CGBuilderBaseTy::CreateMemCpy;
   llvm::CallInst *CreateMemCpy(Address Dest, Address Src, llvm::Value *Size,
-                               bool IsVolatile = false);
+                               bool IsVolatile = false) {
+    return CreateMemCpy(emitRawPointerFromAddress(Dest),
+                        Dest.getAlignment().getAsAlign(),
+                        emitRawPointerFromAddress(Src),
+                        Src.getAlignment().getAsAlign(), Size, IsVolatile);
+  }
   llvm::CallInst *CreateMemCpy(Address Dest, Address Src, uint64_t Size,
                                bool IsVolatile = false) {
     return CreateMemCpy(Dest, Src, getSize(Size), IsVolatile);
   }
-
-  /// Preserve this bytewise copy until FilPizlonator, without early LLVM
-  /// scalarization into potentially unaligned pointer loads and stores.
-  llvm::CallInst *CreateOpaqueMemCpy(Address Dest, Address Src,
-                                     llvm::Value *Size,
-                                     bool IsVolatile = false);
 
   using CGBuilderBaseTy::CreateMemCpyInline;
   llvm::CallInst *CreateMemCpyInline(Address Dest, Address Src, uint64_t Size) {

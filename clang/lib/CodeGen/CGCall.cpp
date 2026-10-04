@@ -1164,26 +1164,6 @@ static RawAddress CreateTempAllocaForCoercion(CodeGenFunction &CGF,
   return CGF.CreateTempAlloca(Ty, Align, Name + ".coerce");
 }
 
-// A pointer-shaped ABI carrier may contain only numeric bits. Its source can
-// be a packed subobject even when the declared type is naturally aligned.
-// Fil-C pointer loads still require word alignment, so stage through a checked
-// bytewise copy rather than synthesizing an unaligned pointer access.
-static Address AlignForPointerCoercion(Address Src, llvm::Type *Ty,
-                                      CodeGenFunction &CGF,
-                                      bool IsVolatile = false) {
-  if (Src.getAlignment() >= CGF.getPointerAlign() ||
-      (!CodeGenTypes::hasPointerRepresentation(Ty) &&
-       !CodeGenTypes::hasPointerRepresentation(Src.getElementType())))
-    return Src;
-  RawAddress Tmp = CreateTempAllocaForCoercion(
-      CGF, Src.getElementType(), CGF.getPointerAlign(), Src.getName());
-  llvm::Value *Size = CGF.Builder.CreateTypeSize(
-      CGF.IntPtrTy,
-      CGF.CGM.getDataLayout().getTypeAllocSize(Src.getElementType()));
-  CGF.Builder.CreateOpaqueMemCpy(Tmp, Src, Size, IsVolatile);
-  return Tmp;
-}
-
 /// EnterStructPointerForCoercedAccess - Given a struct pointer that we are
 /// accessing some number of bytes out of it, try to gep into the struct to get
 /// at its inner goodness.  Dive as deep as possible without entering an element
@@ -1281,7 +1261,6 @@ static llvm::Value *CoerceIntOrPtrToIntOrPtr(llvm::Value *Val,
 /// present in the src are undefined.
 static llvm::Value *CreateCoercedLoad(Address Src, llvm::Type *Ty,
                                       CodeGenFunction &CGF) {
-  Src = AlignForPointerCoercion(Src, Ty, CGF);
   llvm::Type *SrcTy = Src.getElementType();
 
   // If SrcTy and Ty are the same, just do a load.
@@ -1297,11 +1276,6 @@ static llvm::Value *CreateCoercedLoad(Address Src, llvm::Type *Ty,
   }
 
   llvm::TypeSize SrcSize = CGF.CGM.getDataLayout().getTypeAllocSize(SrcTy);
-
-  // A validated full-word pointer carrier must load the capability from
-  // memory, even when a union's selected storage happens to be an integer.
-  if (Ty->isPointerTy() && SrcTy->isIntegerTy() && SrcSize == DstSize)
-    return CGF.Builder.CreateLoad(Src.withElementType(Ty));
 
   // If the source and destination are integer or pointer types, just do an
   // extension or truncation to the desired type.
@@ -1369,18 +1343,6 @@ void CodeGenFunction::CreateCoercedStore(llvm::Value *Src, Address Dst,
 
   llvm::Type *SrcTy = Src->getType();
   llvm::TypeSize SrcSize = CGM.getDataLayout().getTypeAllocSize(SrcTy);
-
-  if (Dst.getAlignment() < getPointerAlign() &&
-      (CodeGenTypes::hasPointerRepresentation(SrcTy) ||
-       CodeGenTypes::hasPointerRepresentation(Dst.getElementType()))) {
-    RawAddress Tmp =
-        CreateTempAllocaForCoercion(*this, SrcTy, getPointerAlign());
-    Builder.CreateStore(Src, Tmp);
-    Builder.CreateOpaqueMemCpy(
-        Dst, Tmp, Builder.CreateTypeSize(IntPtrTy, std::min(SrcSize, DstSize)),
-        DstIsVolatile);
-    return;
-  }
 
   // GEP into structs to try to make types match.
   // FIXME: This isn't really that useful with opaque types, but it impacts a
@@ -2794,7 +2756,7 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
         Attrs.addAttribute(llvm::Attribute::InReg);
 
       if (AI.getIndirectByVal())
-        Attrs.addByValAttr(getTypes().ConvertTypeForByVal(ParamType));
+        Attrs.addByValAttr(getTypes().ConvertTypeForMem(ParamType));
 
       auto *Decl = ParamType->getAsRecordDecl();
       if (CodeGenOpts.PassByValueIsNoAlias && Decl &&
@@ -5294,17 +5256,13 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       assert(NumIRArgs == 1);
       if (I->isAggregate()) {
         // We want to avoid creating an unnecessary temporary+copy here;
-        // however, we need one in four cases:
+        // however, we need one in three cases:
         // 1. If the argument is not byval, and we are required to copy the
         //    source.  (This case doesn't occur on any common architecture.)
         // 2. If the argument is byval, RV is not sufficiently aligned, and
         //    we cannot force it to be sufficiently aligned.
         // 3. If the argument is byval, but RV is not located in default
         //    or alloca address space.
-        // 4. If bytewise byval transport removes typed pointer alignment
-        // checks.
-        //    A C type's alignment promise is not a runtime proof under GIMSO:
-        //    stage into our own aligned allocation before packet demotion.
         Address Addr = I->hasLValue()
                            ? I->getKnownLValue().getAddress()
                            : I->getKnownRValue().getAggregateAddress();
@@ -5316,9 +5274,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
                     TD->getAllocaAddrSpace()) &&
                "indirect argument must be in alloca address space");
 
-        bool NeedCopy = ArgInfo.getIndirectByVal() &&
-                        getTypes().ConvertTypeForByVal(I->Ty) !=
-                            getTypes().ConvertTypeForMem(I->Ty);
+        bool NeedCopy = false;
         if (Addr.getAlignment() < Align &&
             llvm::getOrEnforceKnownAlignment(Addr.emitRawPointer(*this),
                                              Align.getAsAlign(),
@@ -5468,9 +5424,6 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
 
       // If the value is offset in memory, apply the offset now.
       Src = emitAddressAtOffset(*this, Src, ArgInfo);
-      Src = AlignForPointerCoercion(
-          Src, ArgInfo.getCoerceToType(), *this,
-          I->hasLValue() && I->getKnownLValue().isVolatileQualified());
 
       // Fast-isel and the optimizer generally like scalar values better than
       // FCAs, so we flatten them if this is safe to do for this argument.
