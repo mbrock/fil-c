@@ -60,6 +60,38 @@
 # added/removed/renamed, conflicts; untracked files alone erase happily),
 # or when a project's state cannot be assessed at all; --force restores
 # the unconditional erasure.
+# The create sections cover the `create` command: a brand-new .projeny from
+# a tarball or from file:// URLs (with and without a hash — the computed
+# hash equals `projeny hash`), the tarball copied into the pdir, the URL
+# snapshot written from the verified bytes, --comment prose (last wins),
+# the existing-file rule (refuse; --force erases the setup state with the
+# no-force check; --force --force erases unconditionally; --erase-snapshots
+# passthrough), --origname naming the checkout directory (Name: AND
+# Origname: become <name>; the checkout directory is <pdir>/<name>; a
+# mismatch with the archive's top dir refuses before anything is written),
+# the --origname corner guard (a pre-existing checkout directory is erased
+# only when it is attributable — the replaced file itself counts first, so
+# a --force re-run of the same create works — and an unattributable
+# directory is never removed, even with two --force flags), the warning
+# about the evicted sibling's leftover .projeny file (it still claims the
+# checkout name; projeny never deletes .projeny files), the stale-state
+# pin that keeps a URL project's hash-verified snapshot alive across an
+# erase-setup without --erase-snapshots (the next setup re-uses it and
+# downloads nothing), the ordering guarantee that makes the refusals
+# honest (every fallible
+# read-only step — the archive-argument grammar, the URL downloads or the
+# tarball's existence check, the Origname inference with its --origname
+# match, and the guard's attribution — runs before any erase, so a dead
+# URL, a grammar typo, or a top-dir mismatch with --force leaves the old
+# checkout, status file, and .projeny bytes untouched, and a refused
+# tarball-mode create copies nothing), the guard's eviction vs a dirty
+# attributable project (the no-force check at one --force, an unconditional
+# erase only after every fallible check passed at --force --force), the
+# --erase-snapshots passthrough to the guard's erase, and the
+# checkout-directory validation in project-argument resolution: a
+# directory next to a <dir>.projeny whose Name: differs refuses, a
+# matching sibling works, and a git-conflicted sibling keeps falling
+# through to setup's own recovery.
 #
 # Bash is required (process substitution in the status-copy comparisons
 # below); /bin/sh (dash) cannot run this suite.
@@ -10202,37 +10234,54 @@ fi
 expect_file_contains "the status records the new archive" \
     "$T214/.fake.projeny.status" "fake-2.0.tar.gz"
 
-# ----------------------- 215. rebase refuses on a URL project
-# A URL-based project has no checked-in tarball to rebase onto; the refusal
-# explains the URL-edit flow instead of half-doing something.
+# ----------------------- 215. rebase refuses a tarball path on a URL project
+# A URL-based project has no checked-in tarball to rebase onto; a tarball
+# argument is refused and points at the URL form instead. (Since rebase
+# learned URL arguments, the URL project is rebased with `rebase f <url>
+# [<hash>] ...` — section 278 covers that.)
 T215="$ROOT/t215"
 make_tarballs "$T215" fake
 h215="$("$PROJENY" hash "$T215/fake-1.0.tar.gz")"
-printf 'URL: file://%s/fake-1.0.tar.gz %s\nOrigname: fake-1.0\nName: fake\n\n    No rebasing.\n\n' \
+printf 'URL: file://%s/fake-1.0.tar.gz %s\nOrigname: fake-1.0\nName: fake\n\n    No tarball rebasing.\n\n' \
     "$T215" "$h215" > "$T215/fake.projeny"
 run_in "$T215" expect_ok "rebase-refusal fixture setup" "$PROJENY" setup fake.projeny
 out="$(cd "$T215" && "$PROJENY" rebase fake.projeny fake-2.0.tar.gz 2>&1)"
 rc=$?
 if [ $rc -ne 0 ]; then
-    ok "rebase refuses on a URL project"
+    ok "rebase refuses a tarball path on a URL project"
 else
-    fail "rebase refuses on a URL project" "out: $out"
+    fail "rebase refuses a tarball path on a URL project" "out: $out"
 fi
 case "$out" in
 *"URL-based project"*)
-    ok "the refusal explains that URL projects have no Archive:"
+    ok "the refusal says the project is URL-based"
     ;;
 *)
-    fail "the refusal explains that URL projects have no Archive:" \
-         "out: $out"
+    fail "the refusal says the project is URL-based" "out: $out"
+    ;;
+esac
+case "$out" in
+*"rebase it with URL(s) instead"*)
+    ok "the refusal points at the URL form of rebase"
+    ;;
+*)
+    fail "the refusal points at the URL form of rebase" "out: $out"
+    ;;
+esac
+case "$out" in
+*"when the hash is omitted, projeny downloads the tarball and computes the hash"*)
+    ok "the refusal explains the omitted-hash rule"
+    ;;
+*)
+    fail "the refusal explains the omitted-hash rule" "out: $out"
     ;;
 esac
 case "$out" in
 *"projeny hash <file>"*)
-    ok "the refusal points at the URL-edit flow"
+    ok "the refusal points at the hash command"
     ;;
 *)
-    fail "the refusal points at the URL-edit flow" "out: $out"
+    fail "the refusal points at the hash command" "out: $out"
     ;;
 esac
 expect_file_contains "rebase left the URL: header alone" \
@@ -15042,6 +15091,2022 @@ else
     fail "the healthy dirty project still erases with --force" \
          "exit=$rc out: $out"
 fi
+
+# --------------- 270. rebase with a URL and its hash converts to URL:-based
+# The whole point of URL-mode rebase: an Archive:-based project rebases onto
+# file://.../fake-2.0.tar.gz + hash and comes out URL:-based — URL: header,
+# no Archive: header, new Origname, workdir rebased, snapshot written
+# byte-exact, and the URL-based file round-trips through a clean setup.
+T270="$ROOT/t270"
+make_tarballs "$T270" fake
+h270="$("$PROJENY" hash "$T270/fake-2.0.tar.gz")"
+write_projeny "$T270" fake 1.0 fake
+(cd "$T270" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+python3 - "$T270/fake/src/a.c" <<'EOF'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace("int delta = 1;", "int delta = 42;")
+open(p, "w").write(s)
+EOF
+(cd "$T270" && "$PROJENY" commit fake.projeny >/dev/null 2>&1)
+run_in "$T270" expect_ok "URL rebase of an Archive project exits 0" "$PROJENY" \
+    rebase fake.projeny "file://$T270/fake-2.0.tar.gz" "$h270"
+expect_file_contains "the rebase wrote the URL: header" \
+    "$T270/fake.projeny" "URL: file://$T270/fake-2.0.tar.gz $h270"
+expect_file_not_contains "the rebase removed the Archive: header" \
+    "$T270/fake.projeny" "Archive:"
+expect_file_contains "the rebase rewrote Origname to the new top dir" \
+    "$T270/fake.projeny" "Origname: fake-2.0"
+expect_file_contains "the workdir has the new archive's content" \
+    "$T270/fake/README" "hello v2"
+expect_file_contains "the workdir keeps the committed local edit" \
+    "$T270/fake/src/a.c" "delta = 42"
+if cmp -s "$T270/.fake-2.0.tar.gz.snapshot" "$T270/fake-2.0.tar.gz"; then
+    ok "the snapshot holds the verified tarball byte-exact"
+else
+    fail "the snapshot holds the verified tarball byte-exact" \
+         "cmp: snapshot vs tarball"
+fi
+expect_file_contains "the status file embeds the URL: header" \
+    "$T270/.fake.projeny.status" "URL: file://$T270/fake-2.0.tar.gz $h270"
+out="$(cd "$T270" && "$PROJENY" setup fake.projeny 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "a setup of the URL-based file round-trips"
+else
+    fail "a setup of the URL-based file round-trips" "exit=$rc out: $out"
+fi
+case "$out" in
+*"no local changes"*)
+    ok "that setup is a clean noop"
+    ;;
+*)
+    fail "that setup is a clean noop" "out: $out"
+    ;;
+esac
+expect_file_contains "the noop setup keeps the committed edit" \
+    "$T270/fake/src/a.c" "delta = 42"
+
+# -------------------- 271. rebase with the hash omitted: it is computed
+# A URL argument without a hash downloads the tarball, computes the blake3
+# hash, reports it, and records it — the header must end up exactly what
+# `projeny hash` would have printed.
+T271="$ROOT/t271"
+make_tarballs "$T271" fake
+h271="$("$PROJENY" hash "$T271/fake-2.0.tar.gz")"
+write_projeny "$T271" fake 1.0 fake
+(cd "$T271" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+out="$(cd "$T271" && "$PROJENY" rebase fake.projeny "file://$T271/fake-2.0.tar.gz" 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "a hashless URL rebase exits 0"
+else
+    fail "a hashless URL rebase exits 0" "exit=$rc out: $out"
+fi
+case "$out" in
+*"computed blake3 hash $h271 for 'file://$T271/fake-2.0.tar.gz'"*)
+    ok "the computed hash is reported, and it is the tarball's blake3"
+    ;;
+*)
+    fail "the computed hash is reported, and it is the tarball's blake3" \
+         "out: $out"
+    ;;
+esac
+got271="$(grep '^URL: ' "$T271/fake.projeny" | head -1 | awk '{print $3}')"
+if [ "$got271" = "$h271" ]; then
+    ok "the recorded hash equals 'projeny hash' of the tarball"
+else
+    fail "the recorded hash equals 'projeny hash' of the tarball" \
+         "got: $got271 want: $h271"
+fi
+
+# ---------------- 272. rebase with two mirrors, both carrying their hash
+# Two copies of the same tarball under different directories (same basename):
+# both URL: lines must land in the file, in argument order, and the
+# URL-based result must set up cleanly.
+T272="$ROOT/t272"
+make_tarballs "$T272" fake
+mkdir -p "$T272/mirror1" "$T272/mirror2"
+cp "$T272/fake-2.0.tar.gz" "$T272/mirror1/"
+cp "$T272/fake-2.0.tar.gz" "$T272/mirror2/"
+h272="$("$PROJENY" hash "$T272/mirror2/fake-2.0.tar.gz")"
+write_projeny "$T272" fake 1.0 fake
+(cd "$T272" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+run_in "$T272" expect_ok "a two-mirror URL rebase exits 0" "$PROJENY" \
+    rebase fake.projeny \
+    "file://$T272/mirror1/fake-2.0.tar.gz" "$h272" \
+    "file://$T272/mirror2/fake-2.0.tar.gz" "$h272"
+n272="$(grep -c '^URL: ' "$T272/fake.projeny")"
+if [ "$n272" -eq 2 ]; then
+    ok "both mirrors are listed"
+else
+    fail "both mirrors are listed" "got $n272 URL: lines"
+fi
+first272="$(grep '^URL: ' "$T272/fake.projeny" | head -1)"
+last272="$(grep '^URL: ' "$T272/fake.projeny" | tail -1)"
+case "$first272" in
+*"file://$T272/mirror1/fake-2.0.tar.gz $h272"*)
+    ok "the first mirror is listed first, with its hash"
+    ;;
+*)
+    fail "the first mirror is listed first, with its hash" "line: $first272"
+    ;;
+esac
+case "$last272" in
+*"file://$T272/mirror2/fake-2.0.tar.gz $h272"*)
+    ok "the second mirror is listed second, with its hash"
+    ;;
+*)
+    fail "the second mirror is listed second, with its hash" "line: $last272"
+    ;;
+esac
+run_in "$T272" expect_ok "the mirrored URL project sets up cleanly" \
+    "$PROJENY" setup fake.projeny
+
+# ------------- 273. mixed forms: a hashless URL followed by a hashed one
+# The hashless URL's hash is computed from its download; the hashed URL's
+# hash is verified. Both lines must end up carrying hashes.
+T273="$ROOT/t273"
+make_tarballs "$T273" fake
+mkdir -p "$T273/mirror1" "$T273/mirror2"
+cp "$T273/fake-2.0.tar.gz" "$T273/mirror1/"
+cp "$T273/fake-2.0.tar.gz" "$T273/mirror2/"
+h273="$("$PROJENY" hash "$T273/mirror1/fake-2.0.tar.gz")"
+write_projeny "$T273" fake 1.0 fake
+(cd "$T273" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+run_in "$T273" expect_ok "a mixed hashless/hashed rebase exits 0" "$PROJENY" \
+    rebase fake.projeny \
+    "file://$T273/mirror1/fake-2.0.tar.gz" \
+    "file://$T273/mirror2/fake-2.0.tar.gz" "$h273"
+n273="$(grep -c '^URL: ' "$T273/fake.projeny")"
+if [ "$n273" -eq 2 ]; then
+    ok "both mixed-form URLs are listed"
+else
+    fail "both mixed-form URLs are listed" "got $n273 URL: lines"
+fi
+got273a="$(grep '^URL: ' "$T273/fake.projeny" | head -1 | awk '{print $3}')"
+got273b="$(grep '^URL: ' "$T273/fake.projeny" | tail -1 | awk '{print $3}')"
+if [ "$got273a" = "$h273" ]; then
+    ok "the hashless URL's computed hash is correct"
+else
+    fail "the hashless URL's computed hash is correct" \
+         "got: $got273a want: $h273"
+fi
+if [ "$got273b" = "$h273" ]; then
+    ok "the hashed URL's hash was kept"
+else
+    fail "the hashed URL's hash was kept" "got: $got273b want: $h273"
+fi
+
+# ------------------- 274. mirror fall-through: a hashed URL that cannot be
+# downloaded only warns. The first URL points into a nonexistent directory
+# but carries the correct hash; the second URL is valid. The rebase must
+# succeed from the second mirror, keep BOTH lines (setup will fall through
+# the first one at setup time), and name the snapshot after the FIRST URL's
+# basename — the same derivation ProjenyFile::parse applies.
+T274="$ROOT/t274"
+make_tarballs "$T274" fake
+mkdir -p "$T274/alt"
+cp "$T274/fake-2.0.tar.gz" "$T274/alt/fake-2.0.alt.tar.gz"
+h274="$("$PROJENY" hash "$T274/fake-2.0.tar.gz")"
+h274alt="$("$PROJENY" hash "$T274/alt/fake-2.0.alt.tar.gz")"
+write_projeny "$T274" fake 1.0 fake
+(cd "$T274" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+out="$(cd "$T274" && "$PROJENY" rebase fake.projeny \
+    "file://$T274/nope/fake-2.0.tar.gz" "$h274" \
+    "file://$T274/alt/fake-2.0.alt.tar.gz" "$h274alt" 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "a dead first mirror falls through and the rebase exits 0"
+else
+    fail "a dead first mirror falls through and the rebase exits 0" \
+         "exit=$rc out: $out"
+fi
+case "$out" in
+*"could not download 'file://$T274/nope/fake-2.0.tar.gz'"*)
+    ok "the dead mirror's failure is warned"
+    ;;
+*)
+    fail "the dead mirror's failure is warned" "out: $out"
+    ;;
+esac
+expect_file_contains "the dead mirror stays listed" \
+    "$T274/fake.projeny" "URL: file://$T274/nope/fake-2.0.tar.gz $h274"
+expect_file_contains "the working mirror is listed" \
+    "$T274/fake.projeny" "URL: file://$T274/alt/fake-2.0.alt.tar.gz $h274alt"
+if [ -f "$T274/.fake-2.0.tar.gz.snapshot" ]; then
+    ok "the snapshot is named after the FIRST URL's basename"
+else
+    fail "the snapshot is named after the FIRST URL's basename" \
+         "ls: $(ls -A "$T274" 2>&1)"
+fi
+if [ ! -e "$T274/.fake-2.0.alt.tar.gz.snapshot" ]; then
+    ok "the snapshot is not named after the mirror that provided the bytes"
+else
+    fail "the snapshot is not named after the mirror that provided the bytes" \
+         "unexpected .fake-2.0.alt.tar.gz.snapshot"
+fi
+if cmp -s "$T274/.fake-2.0.tar.gz.snapshot" "$T274/fake-2.0.tar.gz"; then
+    ok "the snapshot still holds the verified tarball bytes"
+else
+    fail "the snapshot still holds the verified tarball bytes" \
+         "cmp: snapshot vs tarball"
+fi
+expect_file_contains "the workdir was rebased from the second mirror" \
+    "$T274/fake/README" "hello v2"
+
+# ------------------------- 275. a hash mismatch hard-errors, touching nothing
+# The user asserted the hash on the command line, so a 64-hex-but-wrong value
+# is a hard error (never a silent fall-through, never a bad pair written into
+# the file): the .projeny file stays Archive:-based, the workdir stays on the
+# old base, and no snapshot for the new archive appears.
+T275="$ROOT/t275"
+make_tarballs "$T275" fake
+bad275="$(printf 'a%.0s' $(seq 64))"
+write_projeny "$T275" fake 1.0 fake
+(cd "$T275" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+out="$(cd "$T275" && "$PROJENY" rebase fake.projeny \
+    "file://$T275/fake-2.0.tar.gz" "$bad275" 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "a wrong asserted hash hard-errors the rebase"
+else
+    fail "a wrong asserted hash hard-errors the rebase" "out: $out"
+fi
+case "$out" in
+*"downloaded 'file://$T275/fake-2.0.tar.gz' but its blake3 hash is"*)
+    ok "the mismatch error names the URL and the computed hash"
+    ;;
+*)
+    fail "the mismatch error names the URL and the computed hash" "out: $out"
+    ;;
+esac
+case "$out" in
+*", expected $bad275"*)
+    ok "the mismatch error names the expected hash"
+    ;;
+*)
+    fail "the mismatch error names the expected hash" "out: $out"
+    ;;
+esac
+expect_file_contains "the .projeny file is still Archive:-based" \
+    "$T275/fake.projeny" "Archive: fake-1.0.tar.gz"
+expect_file_not_contains "no URL: header was written" \
+    "$T275/fake.projeny" "URL:"
+expect_file_contains "the workdir still holds the old content" \
+    "$T275/fake/README" "hello v1"
+if [ ! -e "$T275/.fake-2.0.tar.gz.snapshot" ]; then
+    ok "no snapshot for the new archive was written"
+else
+    fail "no snapshot for the new archive was written" \
+         "unexpected .fake-2.0.tar.gz.snapshot"
+fi
+
+# --------------------------- 276. URL-mode argument errors touch nothing
+# Every malformed argument combination fails before anything is parsed into
+# the file: a non-hash tail after a URL, two tarball paths, a hash before any
+# URL, and two hashes in a row.
+T276="$ROOT/t276"
+make_tarballs "$T276" fake
+h276="$("$PROJENY" hash "$T276/fake-2.0.tar.gz")"
+write_projeny "$T276" fake 1.0 fake
+(cd "$T276" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+out="$(cd "$T276" && "$PROJENY" rebase fake.projeny \
+    "file://$T276/fake-2.0.tar.gz" zzz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "a non-hash tail after a URL fails"
+else
+    fail "a non-hash tail after a URL fails" "out: $out"
+fi
+case "$out" in
+*"invalid blake3 hash 'zzz'"*)
+    ok "the non-hash tail error names the bad hash"
+    ;;
+*)
+    fail "the non-hash tail error names the bad hash" "out: $out"
+    ;;
+esac
+run_in "$T276" expect_fail "two tarball paths refuse the legacy form" \
+    "$PROJENY" rebase fake.projeny fake-1.0.tar.gz fake-2.0.tar.gz
+run_in "$T276" expect_fail "a hash before any URL refuses" \
+    "$PROJENY" rebase fake.projeny "$h276" "file://$T276/fake-2.0.tar.gz"
+run_in "$T276" expect_fail "two hashes in a row refuse" \
+    "$PROJENY" rebase fake.projeny "file://$T276/fake-2.0.tar.gz" \
+    "$h276" "$h276"
+expect_file_contains "the argument errors left the file Archive:-based" \
+    "$T276/fake.projeny" "Archive: fake-1.0.tar.gz"
+expect_file_not_contains "the argument errors wrote no URL: header" \
+    "$T276/fake.projeny" "URL:"
+expect_file_contains "the workdir was never touched" \
+    "$T276/fake/README" "hello v1"
+
+# ------------------ 277. a URL:-based project rebases to a new URL
+# The previously-refused direction now works: a URL project rebased onto
+# another file:// URL with its hash swaps the URL: header (the old one is
+# gone), rebases the workdir, and keeps the committed edit.
+T277="$ROOT/t277"
+make_tarballs "$T277" fake
+h277a="$("$PROJENY" hash "$T277/fake-1.0.tar.gz")"
+h277b="$("$PROJENY" hash "$T277/fake-2.0.tar.gz")"
+printf 'URL: file://%s/fake-1.0.tar.gz %s\nOrigname: fake-1.0\nName: fake\n\n    URL project, rebased by URL.\n\n' \
+    "$T277" "$h277a" > "$T277/fake.projeny"
+(cd "$T277" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+python3 - "$T277/fake/src/a.c" <<'EOF'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace("int delta = 1;", "int delta = 42;")
+open(p, "w").write(s)
+EOF
+(cd "$T277" && "$PROJENY" commit fake.projeny >/dev/null 2>&1)
+run_in "$T277" expect_ok "a URL project rebases onto a new URL" "$PROJENY" \
+    rebase fake.projeny "file://$T277/fake-2.0.tar.gz" "$h277b"
+expect_file_contains "the new URL: header is in place" \
+    "$T277/fake.projeny" "URL: file://$T277/fake-2.0.tar.gz $h277b"
+expect_file_not_contains "the old URL: header is gone" \
+    "$T277/fake.projeny" "fake-1.0.tar.gz"
+expect_file_contains "Origname moved to the new top dir" \
+    "$T277/fake.projeny" "Origname: fake-2.0"
+expect_file_contains "the workdir was rebased to the new base" \
+    "$T277/fake/README" "hello v2"
+expect_file_contains "the committed edit survived the URL rebase" \
+    "$T277/fake/src/a.c" "delta = 42"
+run_in "$T277" expect_ok "the rebased URL project sets up cleanly" \
+    "$PROJENY" setup fake.projeny
+
+# ------------------- 278. a conflicting URL rebase, then resolve + commit
+# Same conflict shape as the classic rebase: a committed edit in the alpha
+# region meets fake-2.0's own alpha change. The command exits 0, markers
+# land in the workdir, the status file records the conflict, and the usual
+# resolve + commit + clean-setup flow finishes the job.
+T278="$ROOT/t278"
+make_tarballs "$T278" fake
+h278="$("$PROJENY" hash "$T278/fake-2.0.tar.gz")"
+write_projeny "$T278" fake 1.0 fake
+(cd "$T278" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+python3 - "$T278/fake/src/a.c" <<'EOF'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace("int alpha = 1;", "int alpha = 100;")
+open(p, "w").write(s)
+EOF
+(cd "$T278" && "$PROJENY" commit fake.projeny >/dev/null 2>&1)
+run_in "$T278" expect_ok "a conflicting URL rebase exits 0 (with markers)" \
+    "$PROJENY" rebase fake.projeny "file://$T278/fake-2.0.tar.gz" "$h278"
+expect_file_contains "the conflicting URL rebase leaves markers" \
+    "$T278/fake/src/a.c" "<<<<<<<"
+expect_file_contains "the conflict is recorded in the status file" \
+    "$T278/.fake.projeny.status" "Conflict: src/a.c"
+expect_file_contains "the conflicted rebase still converted the headers" \
+    "$T278/fake.projeny" "URL: file://$T278/fake-2.0.tar.gz $h278"
+printf 'int alpha = 777;\n\nint beta = 1;\n\nint gamma = 1;\n\nint delta = 1;\n' \
+    > "$T278/fake/src/a.c"
+run_in "$T278" expect_ok "resolve clears the URL rebase conflict" \
+    "$PROJENY" resolve fake.projeny fake/src/a.c
+run_in "$T278" expect_ok "commit succeeds after the URL rebase conflict" \
+    "$PROJENY" commit fake.projeny
+run_in "$T278" expect_ok "the resolved URL project sets up cleanly" \
+    "$PROJENY" setup fake.projeny
+expect_file_contains "the final tree holds the resolution" \
+    "$T278/fake/src/a.c" "alpha = 777"
+
+# --------- 279. rebase over real HTTP: the hash is computed from the download
+# Every URL above is file:// — hermetic. One test must prove the same flow
+# over plain HTTP: the suite's inline python3 socket server serves
+# fake-2.0.tar.gz on 127.0.0.1, and the rebase names it with NO hash, so the
+# recorded hash must come from the download itself.
+T279="$ROOT/t279"
+make_tarballs "$T279" fake
+h279="$("$PROJENY" hash "$T279/fake-2.0.tar.gz")"
+cat > "$T279/serv.py" <<'PYEOF'
+import socket, sys
+
+# One-file HTTP/1.0 server: after the GET it streams the file and closes
+# (one connection per transfer).
+
+path, portfile = sys.argv[1], sys.argv[2]
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0))
+s.listen(16)
+# The port file is written only after listen(), so a client that reads
+# it can always connect.
+open(portfile, "w").write(str(s.getsockname()[1]))
+while True:
+    c, _ = s.accept()
+    try:
+        c.recv(65536)  # the GET; one connection per transfer
+        c.sendall(b"HTTP/1.0 200 OK\r\nConnection: close\r\n\r\n")
+        with open(path, "rb") as f:
+            while True:
+                b = f.read(65536)
+                if not b:
+                    break
+                c.sendall(b)
+    except OSError:
+        pass
+    finally:
+        c.close()
+PYEOF
+python3 "$T279/serv.py" "$T279/fake-2.0.tar.gz" "$T279/port" &
+srvpid=$!
+port279=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if [ -s "$T279/port" ]; then port279="$(cat "$T279/port")"; break; fi
+    sleep 0.05
+done
+if [ -z "$port279" ]; then
+    kill "$srvpid" 2>/dev/null
+    fail "the HTTP rebase fixture server starts" "port file never appeared"
+else
+    write_projeny "$T279" fake 1.0 fake
+    (cd "$T279" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+    out="$(cd "$T279" && "$PROJENY" rebase fake.projeny \
+        "http://127.0.0.1:$port279/fake-2.0.tar.gz" 2>&1)"
+    rc=$?
+    kill "$srvpid" 2>/dev/null
+    wait "$srvpid" 2>/dev/null
+
+    if [ $rc -eq 0 ]; then
+        ok "an HTTP URL rebase without a hash exits 0"
+    else
+        fail "an HTTP URL rebase without a hash exits 0" "exit=$rc out: $out"
+    fi
+    case "$out" in
+    *"projeny: downloading 'http://127.0.0.1:$port279/fake-2.0.tar.gz'"*)
+        ok "the HTTP download is announced"
+        ;;
+    *)
+        fail "the HTTP download is announced" "out: $out"
+        ;;
+    esac
+    case "$out" in
+    *"computed blake3 hash $h279 for 'http://127.0.0.1:$port279/fake-2.0.tar.gz'"*)
+        ok "the hash computed from the HTTP download is correct"
+        ;;
+    *)
+        fail "the hash computed from the HTTP download is correct" "out: $out"
+        ;;
+    esac
+    expect_file_contains "the HTTP URL: header carries the computed hash" \
+        "$T279/fake.projeny" \
+        "URL: http://127.0.0.1:$port279/fake-2.0.tar.gz $h279"
+    expect_file_contains "the HTTP rebase moved the workdir to the new base" \
+        "$T279/fake/README" "hello v2"
+fi
+
+# ------------ 280. a failed same-basename URL rebase leaves the snapshot alone
+# Regression guard: the rebase's new-archive bytes used to be written straight
+# into pdir/.<new_base>.snapshot BEFORE the tarball was parsed and merged — so
+# a rebase whose new URL shares the old archive's basename clobbered the
+# checkout's only local copy of the base the .projeny file still records, and
+# any later die bricked the checkout (setup would find a snapshot matching no
+# recorded hash and re-download from the old URL). The bytes now go to a
+# scratch file and the snapshot is written last: a garbage tarball served
+# under the old basename must fail the rebase while the .projeny file, the
+# status file, the snapshot, and the workdir all stay byte-identical.
+T280="$ROOT/t280"
+make_tarballs "$T280" fake
+mkdir -p "$T280/old" "$T280/new"
+cp "$T280/fake-1.0.tar.gz" "$T280/old/fake-1.0.tar.gz"
+h280="$("$PROJENY" hash "$T280/old/fake-1.0.tar.gz")"
+# The new URL serves garbage bytes under the SAME basename the old snapshot
+# is cached under; its hash is passed explicitly, so download+verify succeed
+# and the failure lands later, in the tarball parse.
+printf 'this is a plain text file, not a tar archive\n' \
+    > "$T280/new/fake-1.0.tar.gz"
+h280new="$("$PROJENY" hash "$T280/new/fake-1.0.tar.gz")"
+printf 'URL: file://%s/old/fake-1.0.tar.gz %s\nOrigname: fake-1.0\nName: fake\n\n    Failed same-basename rebase fixture.\n\n' \
+    "$T280" "$h280" > "$T280/fake.projeny"
+(cd "$T280" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+cp "$T280/fake.projeny" "$T280/keep.projeny"
+cp "$T280/.fake.projeny.status" "$T280/keep.status"
+cp "$T280/.fake-1.0.tar.gz.snapshot" "$T280/keep.snapshot"
+out="$(cd "$T280" && "$PROJENY" rebase fake.projeny \
+    "file://$T280/new/fake-1.0.tar.gz" "$h280new" 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "a garbage tarball under the old basename fails the rebase"
+else
+    fail "a garbage tarball under the old basename fails the rebase" "out: $out"
+fi
+case "$out" in
+*"projeny: downloading 'file://$T280/new/fake-1.0.tar.gz'"*)
+    ok "the garbage download itself succeeded (the hash was correct)"
+    ;;
+*)
+    fail "the garbage download itself succeeded (the hash was correct)" \
+         "out: $out"
+    ;;
+esac
+case "$out" in
+*"cannot list archive"*)
+    ok "the failure is the tarball parse, after every download"
+    ;;
+*)
+    fail "the failure is the tarball parse, after every download" "out: $out"
+    ;;
+esac
+if cmp -s "$T280/fake.projeny" "$T280/keep.projeny"; then
+    ok "the .projeny file is byte-unchanged (still the old URL and hash)"
+else
+    fail "the .projeny file is byte-unchanged (still the old URL and hash)" \
+         "the rebase rewrote it: $(cat "$T280/fake.projeny")"
+fi
+if cmp -s "$T280/.fake.projeny.status" "$T280/keep.status"; then
+    ok "the status file is byte-unchanged"
+else
+    fail "the status file is byte-unchanged" "the rebase rewrote it"
+fi
+if cmp -s "$T280/.fake-1.0.tar.gz.snapshot" "$T280/keep.snapshot"; then
+    ok "the snapshot is byte-identical to the old download"
+else
+    fail "the snapshot is byte-identical to the old download" \
+         "the rebase clobbered it with the new bytes"
+fi
+expect_file_contains "the workdir still holds the old base's README" \
+    "$T280/fake/README" "hello v1"
+expect_file_contains "the workdir still holds the old base's source" \
+    "$T280/fake/src/a.c" "int alpha = 1;"
+
+# ------------ 281. a successful same-basename URL rebase lands the snapshot
+# The happy-side twin of the regression above: rebasing a URL project onto a
+# new tarball that reuses the old archive's BASENAME (different bytes, same
+# fake-1.0.tar.gz name) must exit 0, point the .projeny file at the new URL,
+# rebase the workdir, and leave the snapshot byte-equal to the new tarball —
+# so a following setup is a clean noop even with the old URL dead.
+T281="$ROOT/t281"
+make_tarballs "$T281" fake
+mkdir -p "$T281/old"
+cp "$T281/fake-1.0.tar.gz" "$T281/old/fake-1.0.tar.gz"
+h281="$("$PROJENY" hash "$T281/old/fake-1.0.tar.gz")"
+# The new base: v2-style content packed under the OLD archive's basename.
+mkdir -p "$T281/new/fake-1.0/src"
+cat > "$T281/new/fake-1.0/src/a.c" <<'EOF'
+int alpha = 2;
+
+int beta = 1;
+
+int gamma = 1;
+
+int delta = 1;
+EOF
+printf 'line one v2\n' > "$T281/new/fake-1.0/src/b.c"
+printf 'hello v2\n' > "$T281/new/fake-1.0/README"
+(cd "$T281/new" && tar -czf fake-1.0.tar.gz fake-1.0)
+rm -rf "$T281/new/fake-1.0"
+h281new="$("$PROJENY" hash "$T281/new/fake-1.0.tar.gz")"
+if [ "$h281" != "$h281new" ]; then
+    ok "the fixture's two tarballs really differ under one basename"
+else
+    fail "the fixture's two tarballs really differ under one basename" \
+         "old and new hashes are both $h281"
+fi
+printf 'URL: file://%s/old/fake-1.0.tar.gz %s\nOrigname: fake-1.0\nName: fake\n\n    Same-basename rebase fixture.\n\n' \
+    "$T281" "$h281" > "$T281/fake.projeny"
+(cd "$T281" && "$PROJENY" setup fake.projeny >/dev/null 2>&1)
+python3 - "$T281/fake/src/a.c" <<'EOF'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace("int delta = 1;", "int delta = 42;")
+open(p, "w").write(s)
+EOF
+(cd "$T281" && "$PROJENY" commit fake.projeny >/dev/null 2>&1)
+run_in "$T281" expect_ok "a same-basename URL rebase exits 0" "$PROJENY" \
+    rebase fake.projeny "file://$T281/new/fake-1.0.tar.gz" "$h281new"
+expect_file_contains "the .projeny file names the new URL and hash" \
+    "$T281/fake.projeny" "URL: file://$T281/new/fake-1.0.tar.gz $h281new"
+expect_file_not_contains "the old URL is gone from the .projeny file" \
+    "$T281/fake.projeny" "old/fake-1.0.tar.gz"
+expect_file_contains "the workdir was rebased onto the new base" \
+    "$T281/fake/README" "hello v2"
+expect_file_contains "the workdir keeps the new base's content" \
+    "$T281/fake/src/a.c" "int alpha = 2;"
+expect_file_contains "the workdir keeps the committed edit" \
+    "$T281/fake/src/a.c" "delta = 42"
+if cmp -s "$T281/.fake-1.0.tar.gz.snapshot" "$T281/new/fake-1.0.tar.gz"; then
+    ok "the snapshot is byte-equal to the new tarball"
+else
+    fail "the snapshot is byte-equal to the new tarball" \
+         "cmp: snapshot vs $T281/new/fake-1.0.tar.gz"
+fi
+rm -rf "$T281/old"
+out="$(cd "$T281" && "$PROJENY" setup fake.projeny 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "a setup after the rebase exits 0 with the old URL dead"
+else
+    fail "a setup after the rebase exits 0 with the old URL dead" \
+         "exit=$rc out: $out"
+fi
+case "$out" in
+*"no local changes"*)
+    ok "that setup is a clean noop"
+    ;;
+*)
+    fail "that setup is a clean noop" "out: $out"
+    ;;
+esac
+case "$out" in
+*"downloading"*)
+    fail "that setup was satisfied by the snapshot (no re-download)" \
+         "out: $out"
+    ;;
+*)
+    ok "that setup was satisfied by the snapshot (no re-download)"
+    ;;
+esac
+
+# --------------- 282. the URL-project refusal precedes the setup-first fallback
+# A never-set-up URL project given a tarball path must be refused BEFORE the
+# setup-first fallback runs — that fallback is a full setup, which downloads
+# and creates a checkout the tarball form can never rebase. Afterwards neither
+# the workdir nor the status file (nor the snapshot a setup would have
+# downloaded) may exist.
+T282="$ROOT/t282"
+make_tarballs "$T282" fake
+h282="$("$PROJENY" hash "$T282/fake-1.0.tar.gz")"
+printf 'URL: file://%s/fake-1.0.tar.gz %s\nOrigname: fake-1.0\nName: fake\n\n    Never set up; refused before any setup.\n\n' \
+    "$T282" "$h282" > "$T282/fake.projeny"
+out="$(cd "$T282" && "$PROJENY" rebase fake.projeny fake-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "a tarball path on a never-set-up URL project refuses"
+else
+    fail "a tarball path on a never-set-up URL project refuses" "out: $out"
+fi
+case "$out" in
+*"it is a URL-based project"*)
+    ok "the refusal is the URL-project message"
+    ;;
+*)
+    fail "the refusal is the URL-project message" "out: $out"
+    ;;
+esac
+case "$out" in
+*"running setup first"*)
+    fail "the refusal precedes the setup-first fallback" "out: $out"
+    ;;
+*)
+    ok "the refusal precedes the setup-first fallback"
+    ;;
+esac
+if [ ! -e "$T282/fake" ]; then
+    ok "no workdir was created"
+else
+    fail "no workdir was created" "unexpected workdir: $(ls "$T282/fake")"
+fi
+if [ ! -e "$T282/.fake.projeny.status" ]; then
+    ok "no status file was created"
+else
+    fail "no status file was created" "unexpected .fake.projeny.status"
+fi
+if [ ! -e "$T282/.fake-1.0.tar.gz.snapshot" ]; then
+    ok "no snapshot was downloaded"
+else
+    fail "no snapshot was downloaded" "unexpected .fake-1.0.tar.gz.snapshot"
+fi
+
+# ---------------------- 283. create from a tarball
+# The basic form: a brand-new .projeny file composed from the tarball
+# (Archive: basename, Origname: the archive's single top dir, Name: the
+# file's stem), the tarball copied next to it, and setup run: the checkout,
+# the status file, a second setup that is a noop, and a clean status.
+T283="$ROOT/t283"
+mkdir -p "$T283/dl"
+make_tarballs "$T283/dl" fake
+run_in "$T283" expect_ok "create from a tarball exits 0" "$PROJENY" \
+    create foo.projeny dl/fake-1.0.tar.gz
+expect_file_contains "the created file names the archive" \
+    "$T283/foo.projeny" "Archive: fake-1.0.tar.gz"
+expect_file_contains "the created file infers Origname from the top dir" \
+    "$T283/foo.projeny" "Origname: fake-1.0"
+expect_file_contains "the created file defaults Name to the stem" \
+    "$T283/foo.projeny" "Name: foo"
+if cmp -s "$T283/fake-1.0.tar.gz" "$T283/dl/fake-1.0.tar.gz"; then
+    ok "the tarball was copied into the pdir byte-exact"
+else
+    fail "the tarball was copied into the pdir byte-exact" \
+         "cmp: $T283/fake-1.0.tar.gz vs $T283/dl/fake-1.0.tar.gz"
+fi
+if [ -d "$T283/foo/src" ] && [ -f "$T283/foo/README" ]; then
+    ok "the checkout was set up from the tarball"
+else
+    fail "the checkout was set up from the tarball" "ls: $(ls -A "$T283")"
+fi
+expect_file_contains "the checkout holds the tarball's content" \
+    "$T283/foo/README" "hello v1"
+if [ -f "$T283/.foo.projeny.status" ]; then
+    ok "create wrote the status file"
+else
+    fail "create wrote the status file" "ls: $(ls -A "$T283")"
+fi
+out="$(run_in "$T283" "$PROJENY" setup foo.projeny 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "a second setup exits 0"
+else
+    fail "a second setup exits 0" "exit=$rc out: $out"
+fi
+case "$out" in
+*"no local changes"*)
+    ok "the second setup is a noop"
+    ;;
+*)
+    fail "the second setup is a noop" "out: $out"
+    ;;
+esac
+out="$(run_in "$T283" "$PROJENY" status foo.projeny 2>&1)"
+rc=$?
+case "$out" in
+*"Modified:"*|*"Conflict:"*|*"Disappeared:"*)
+    fail "the status of a fresh create is clean" "out: $out"
+    ;;
+*)
+    if [ $rc -eq 0 ]; then
+        ok "the status of a fresh create is clean"
+    else
+        fail "the status of a fresh create is clean" "exit=$rc out: $out"
+    fi
+    ;;
+esac
+
+# ---------------- 284. create from a file:// URL with its hash
+# URL mode: the file is born URL:-based (no Archive: header), the verified
+# download is cached as the snapshot named after the URL's basename, the
+# checkout is set up, and a second setup re-uses the snapshot — it
+# downloads nothing.
+T284="$ROOT/t284"
+make_tarballs "$T284" fake
+h284="$("$PROJENY" hash "$T284/fake-1.0.tar.gz")"
+run_in "$T284" expect_ok "create from a URL with its hash exits 0" "$PROJENY" \
+    create foo.projeny "file://$T284/fake-1.0.tar.gz" "$h284"
+expect_file_contains "the created file carries the URL: header" \
+    "$T284/foo.projeny" "URL: file://$T284/fake-1.0.tar.gz $h284"
+expect_file_not_contains "the created file has no Archive: header" \
+    "$T284/foo.projeny" "Archive:"
+expect_file_contains "the created file infers Origname" \
+    "$T284/foo.projeny" "Origname: fake-1.0"
+if cmp -s "$T284/.fake-1.0.tar.gz.snapshot" "$T284/fake-1.0.tar.gz"; then
+    ok "the snapshot holds the verified tarball byte-exact"
+else
+    fail "the snapshot holds the verified tarball byte-exact" \
+         "cmp: snapshot vs tarball"
+fi
+expect_file_contains "the URL checkout holds the tarball's content" \
+    "$T284/foo/README" "hello v1"
+out="$(run_in "$T284" "$PROJENY" setup foo.projeny 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "a second setup of the URL project exits 0"
+else
+    fail "a second setup of the URL project exits 0" "exit=$rc out: $out"
+fi
+case "$out" in
+*"downloading"*)
+    fail "the second setup downloaded nothing" "out: $out"
+    ;;
+*)
+    ok "the second setup downloaded nothing"
+    ;;
+esac
+
+# ---------------- 285. create from a URL without a hash
+# The hash is computed from the download and reported; the recorded hash
+# must be exactly what `projeny hash` prints for the tarball.
+T285="$ROOT/t285"
+make_tarballs "$T285" fake
+h285="$("$PROJENY" hash "$T285/fake-1.0.tar.gz")"
+out="$(run_in "$T285" "$PROJENY" create foo.projeny \
+    "file://$T285/fake-1.0.tar.gz" 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "a hashless URL create exits 0"
+else
+    fail "a hashless URL create exits 0" "exit=$rc out: $out"
+fi
+case "$out" in
+*"computed blake3 hash $h285 for 'file://$T285/fake-1.0.tar.gz'"*)
+    ok "the computed hash is reported"
+    ;;
+*)
+    fail "the computed hash is reported" "out: $out"
+    ;;
+esac
+got285="$(grep '^URL: ' "$T285/foo.projeny" | head -1 | awk '{print $3}')"
+if [ "$got285" = "$h285" ]; then
+    ok "the recorded hash equals 'projeny hash' of the tarball"
+else
+    fail "the recorded hash equals 'projeny hash' of the tarball" \
+         "got: $got285 want: $h285"
+fi
+
+# ---------------- 286. --comment stores the prose; last occurrence wins
+T286="$ROOT/t286"
+make_tarballs "$T286" fake
+run_in "$T286" expect_ok "create with --comment exits 0" "$PROJENY" \
+    create foo.projeny --comment "Blah blah" fake-1.0.tar.gz
+expect_file_contains "the comment is stored as indented prose" \
+    "$T286/foo.projeny" "    Blah blah"
+run_in "$T286" expect_ok "the commented file sets up again" "$PROJENY" \
+    setup foo.projeny
+run_in "$T286" expect_ok "repeating --comment keeps the last text" "$PROJENY" \
+    create foo.projeny --force fake-1.0.tar.gz \
+    --comment "First note" --comment "Second note"
+expect_file_contains "the last --comment wins" \
+    "$T286/foo.projeny" "    Second note"
+expect_file_not_contains "the earlier --comment is gone" \
+    "$T286/foo.projeny" "First note"
+
+# ------------- 287. create refuses when the .projeny file already exists
+# Without --force nothing is touched: the file is byte-unchanged and the
+# existing checkout is left alone.
+T287="$ROOT/t287"
+make_tarballs "$T287" fake
+run_in "$T287" expect_ok "the existing-file fixture creates" "$PROJENY" \
+    create foo.projeny fake-1.0.tar.gz
+cp "$T287/foo.projeny" "$T287/keep.projeny"
+cp "$T287/foo/README" "$T287/keep-readme"
+out="$(run_in "$T287" "$PROJENY" create foo.projeny fake-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "create over an existing file refuses"
+else
+    fail "create over an existing file refuses" "out: $out"
+fi
+case "$out" in
+*"it already exists (pass --force to overwrite it and erase its setup state"*)
+    ok "the refusal names the --force escape hatches"
+    ;;
+*)
+    fail "the refusal names the --force escape hatches" "out: $out"
+    ;;
+esac
+if cmp -s "$T287/foo.projeny" "$T287/keep.projeny"; then
+    ok "the existing file is byte-unchanged"
+else
+    fail "the existing file is byte-unchanged" "the create rewrote it"
+fi
+if cmp -s "$T287/foo/README" "$T287/keep-readme"; then
+    ok "the existing checkout is untouched"
+else
+    fail "the existing checkout is untouched" "the create modified it"
+fi
+
+# ------------- 288. create --force over an existing CLEAN project
+# One --force erases the old project's setup state (erase-setup semantics,
+# its own notes) and the create proceeds: new headers, fresh checkout from
+# the new archive.
+T288="$ROOT/t288"
+make_tarballs "$T288" fake
+run_in "$T288" expect_ok "the force fixture creates from fake-1.0" \
+    "$PROJENY" create foo.projeny fake-1.0.tar.gz
+out="$(run_in "$T288" "$PROJENY" create foo.projeny --force \
+    fake-2.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "create --force over a clean project exits 0"
+else
+    fail "create --force over a clean project exits 0" "exit=$rc out: $out"
+fi
+case "$out" in
+*"erased setup state for 'foo'"*)
+    ok "the old project's setup state was erased (erase-setup note)"
+    ;;
+*)
+    fail "the old project's setup state was erased (erase-setup note)" \
+         "out: $out"
+    ;;
+esac
+expect_file_contains "the file was overwritten with the new archive" \
+    "$T288/foo.projeny" "Archive: fake-2.0.tar.gz"
+expect_file_contains "the checkout was recreated from the new archive" \
+    "$T288/foo/README" "hello v2"
+if [ -f "$T288/.foo.projeny.status" ]; then
+    ok "the new project has a status file"
+else
+    fail "the new project has a status file" "ls: $(ls -A "$T288")"
+fi
+if [ -f "$T288/fake-1.0.tar.gz" ]; then
+    ok "the old checked-in tarball is left alone"
+else
+    fail "the old checked-in tarball is left alone" "ls: $(ls -A "$T288")"
+fi
+
+# ------------- 289. create --force refuses a DIRTY project
+# The no-force check runs at one --force: a checkout with uncommitted
+# changes refuses with erase-setup's own wording, and neither the file nor
+# the workdir is touched.
+T289="$ROOT/t289"
+make_tarballs "$T289" fake
+run_in "$T289" expect_ok "the dirty fixture creates" "$PROJENY" \
+    create foo.projeny fake-1.0.tar.gz
+printf 'hello v1 edited\n' >> "$T289/foo/README"
+cp "$T289/foo.projeny" "$T289/keep.projeny"
+cp "$T289/foo/README" "$T289/keep-readme"
+out="$(run_in "$T289" "$PROJENY" create foo.projeny --force \
+    fake-2.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "create --force over a dirty project refuses"
+else
+    fail "create --force over a dirty project refuses" "out: $out"
+fi
+case "$out" in
+*"refusing to erase 1 of 1 project(s) with uncommitted changes (use --force to erase anyway)"*)
+    ok "the refusal is erase-setup's own wording"
+    ;;
+*)
+    fail "the refusal is erase-setup's own wording" "out: $out"
+    ;;
+esac
+case "$out" in
+*"'foo.projeny': modified: 'README'"*)
+    ok "the refusal names the dirty project and its change"
+    ;;
+*)
+    fail "the refusal names the dirty project and its change" "out: $out"
+    ;;
+esac
+if cmp -s "$T289/foo.projeny" "$T289/keep.projeny"; then
+    ok "the dirty refusal leaves the file byte-unchanged"
+else
+    fail "the dirty refusal leaves the file byte-unchanged" \
+         "the create rewrote it"
+fi
+if cmp -s "$T289/foo/README" "$T289/keep-readme"; then
+    ok "the dirty refusal leaves the workdir byte-unchanged"
+else
+    fail "the dirty refusal leaves the workdir byte-unchanged" \
+         "the create modified it"
+fi
+
+# ------------- 290. create --force --force over the DIRTY project
+# Two --force flags skip the check and erase unconditionally: the dirty
+# work is discarded and the create proceeds from the new archive.
+T290="$ROOT/t290"
+make_tarballs "$T290" fake
+run_in "$T290" expect_ok "the double-force fixture creates" "$PROJENY" \
+    create foo.projeny fake-1.0.tar.gz
+printf 'hello v1 edited\n' >> "$T290/foo/README"
+run_in "$T290" expect_ok "create --force --force over a dirty project" \
+    "$PROJENY" create foo.projeny --force --force fake-2.0.tar.gz
+expect_file_contains "the double-force create overwrote the archive" \
+    "$T290/foo.projeny" "Archive: fake-2.0.tar.gz"
+expect_file_contains "the double-force create discarded the dirty edit" \
+    "$T290/foo/README" "hello v2"
+run_in "$T290" expect_ok "the recreated project is clean" "$PROJENY" \
+    status foo.projeny
+
+# ------------- 291. --erase-snapshots passes through to the --force erase
+# Without it the old project's snapshot survives the --force create; with
+# it, the exact snapshot the old project's next setup would use is gone.
+T291="$ROOT/t291"
+make_tarballs "$T291" fake
+run_in "$T291" expect_ok "the snapshot fixture creates" "$PROJENY" \
+    create foo.projeny fake-1.0.tar.gz
+if [ -f "$T291/.fake-1.0.tar.gz.snapshot" ]; then
+    ok "the first create wrote the snapshot"
+else
+    fail "the first create wrote the snapshot" "ls: $(ls -A "$T291")"
+fi
+run_in "$T291" expect_ok "a --force create without --erase-snapshots" \
+    "$PROJENY" create foo.projeny --force fake-2.0.tar.gz
+if [ -f "$T291/.fake-1.0.tar.gz.snapshot" ]; then
+    ok "the old snapshot survives without --erase-snapshots"
+else
+    fail "the old snapshot survives without --erase-snapshots" \
+         "ls: $(ls -A "$T291")"
+fi
+if [ -f "$T291/.fake-2.0.tar.gz.snapshot" ]; then
+    ok "the new project's snapshot is in place"
+else
+    fail "the new project's snapshot is in place" "ls: $(ls -A "$T291")"
+fi
+run_in "$T291" expect_ok "the erase-snapshots fixture recreates" "$PROJENY" \
+    create foo.projeny --force --erase-snapshots fake-1.0.tar.gz
+if [ ! -e "$T291/.fake-2.0.tar.gz.snapshot" ]; then
+    ok "--erase-snapshots removed the old project's snapshot"
+else
+    fail "--erase-snapshots removed the old project's snapshot" \
+         "unexpected .fake-2.0.tar.gz.snapshot"
+fi
+if [ -f "$T291/.fake-1.0.tar.gz.snapshot" ]; then
+    ok "the recreated project's snapshot is in place"
+else
+    fail "the recreated project's snapshot is in place" \
+         "ls: $(ls -A "$T291")"
+fi
+
+# ------------- 292. --origname names the checkout directory
+# The created file gets BOTH Name: <name> AND Origname: <name> (the archive
+# is built with the top dir bar by hand), so the checkout directory is
+# bar/ while the .projeny file stays foo.projeny.
+T292="$ROOT/t292"
+make_tarballs "$T292" fake
+mkdir -p "$T292/bar/src"
+printf 'bar readme\n' > "$T292/bar/README"
+printf 'int bar = 1;\n' > "$T292/bar/src/a.c"
+(cd "$T292" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+run_in "$T292" expect_ok "create --origname exits 0" "$PROJENY" \
+    create foo.projeny --origname bar bar-1.0.tar.gz
+expect_file_contains "the file's Name: is the --origname value" \
+    "$T292/foo.projeny" "Name: bar"
+expect_file_contains "the file's Origname: is the --origname value" \
+    "$T292/foo.projeny" "Origname: bar"
+expect_file_contains "the file is still foo.projeny (archive header)" \
+    "$T292/foo.projeny" "Archive: bar-1.0.tar.gz"
+if [ -d "$T292/bar/src" ] && [ -f "$T292/bar/README" ]; then
+    ok "the checkout directory is bar/"
+else
+    fail "the checkout directory is bar/" "ls: $(ls -A "$T292")"
+fi
+if [ -f "$T292/foo.projeny" ]; then
+    ok "the .projeny file stays foo.projeny"
+else
+    fail "the .projeny file stays foo.projeny" "ls: $(ls -A "$T292")"
+fi
+run_in "$T292" expect_ok "status works on the file" "$PROJENY" \
+    status foo.projeny
+out="$(run_in "$T292" "$PROJENY" status bar/ 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "status on the checkout dir without a sibling errors"
+else
+    fail "status on the checkout dir without a sibling errors" "out: $out"
+fi
+case "$out" in
+*"directory holds no .projeny file"*)
+    ok "the error is the resolver's no-sibling message"
+    ;;
+*)
+    fail "the error is the resolver's no-sibling message" "out: $out"
+    ;;
+esac
+
+# ------------- 293. --origname must match the archive's top dir
+# The refusal happens before anything is written: no .projeny file, no
+# status file, no checkout.
+T293="$ROOT/t293"
+make_tarballs "$T293" fake
+out="$(run_in "$T293" "$PROJENY" create foo.projeny --origname bar \
+    fake-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "an --origname that mismatches the top dir refuses"
+else
+    fail "an --origname that mismatches the top dir refuses" "out: $out"
+fi
+case "$out" in
+*"the archive 'fake-1.0.tar.gz' unpacks to 'fake-1.0', not 'bar' (setup requires them to match)"*)
+    ok "the refusal words the mismatch exactly"
+    ;;
+*)
+    fail "the refusal words the mismatch exactly" "out: $out"
+    ;;
+esac
+if [ ! -e "$T293/foo.projeny" ] && [ ! -e "$T293/.foo.projeny.status" ] && \
+   [ ! -e "$T293/bar" ]; then
+    ok "nothing was written"
+else
+    fail "nothing was written" "ls: $(ls -A "$T293")"
+fi
+
+# ------------- 294. the --origname corner: a pre-existing bar/ refuses
+# Without --force a checkout directory named by --origname that already
+# exists is a refusal; nothing is changed.
+T294="$ROOT/t294"
+make_tarballs "$T294" fake
+mkdir -p "$T294/bar/src"
+printf 'bar readme\n' > "$T294/bar/README"
+(cd "$T294" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+mkdir -p "$T294/bar"
+printf 'keep me\n' > "$T294/bar/keepme"
+out="$(run_in "$T294" "$PROJENY" create foo.projeny --origname bar \
+    bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "the corner guard refuses without --force"
+else
+    fail "the corner guard refuses without --force" "out: $out"
+fi
+case "$out" in
+*"the checkout directory 'bar' already exists at"*)
+    ok "the refusal names the checkout directory and its path"
+    ;;
+*)
+    fail "the refusal names the checkout directory and its path" \
+         "out: $out"
+    ;;
+esac
+case "$out" in
+*"remove it, or pass --force to erase the setup state of the project that owns it"*)
+    ok "the refusal names the --force escape hatch"
+    ;;
+*)
+    fail "the refusal names the --force escape hatch" "out: $out"
+    ;;
+esac
+if [ "$(cat "$T294/bar/keepme" 2>/dev/null)" = "keep me" ] && \
+   [ ! -e "$T294/foo.projeny" ]; then
+    ok "the directory and its file survive, no .projeny was written"
+else
+    fail "the directory and its file survive, no .projeny was written" \
+         "ls: $(ls -A "$T294")"
+fi
+
+# ------------- 295. the corner + --force: an attributable bar/ is erased
+# bar/ is the checkout of bar.projeny (its Name: is bar) and foo.projeny
+# already exists: one --force erases BOTH projects' setup state (each with
+# its own erase-setup note) and then checks out bar/ fresh from the new
+# create.
+T295="$ROOT/t295"
+make_tarballs "$T295" fake
+mkdir -p "$T295/bar/src"
+printf 'bar readme\n' > "$T295/bar/README"
+printf 'int bar = 1;\n' > "$T295/bar/src/a.c"
+(cd "$T295" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+printf 'Archive: bar-1.0.tar.gz\nOrigname: bar\nName: bar\n\n    Bar project.\n\n' \
+    > "$T295/bar.projeny"
+run_in "$T295" expect_ok "the bar.projeny fixture sets up" "$PROJENY" \
+    setup bar.projeny
+run_in "$T295" expect_ok "the foo.projeny fixture creates" "$PROJENY" \
+    create foo.projeny fake-1.0.tar.gz
+out="$(run_in "$T295" "$PROJENY" create foo.projeny --origname bar --force \
+    bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "the attributable corner create exits 0"
+else
+    fail "the attributable corner create exits 0" "exit=$rc out: $out"
+fi
+case "$out" in
+*"[bar.projeny] erased setup state for 'bar'"*)
+    ok "bar.projeny's setup state was erased (its own note)"
+    ;;
+*)
+    fail "bar.projeny's setup state was erased (its own note)" "out: $out"
+    ;;
+esac
+case "$out" in
+*"[foo.projeny] erased setup state for 'foo'"*)
+    ok "foo.projeny's setup state was erased (its own note)"
+    ;;
+*)
+    fail "foo.projeny's setup state was erased (its own note)" "out: $out"
+    ;;
+esac
+if [ -f "$T295/bar.projeny" ]; then
+    ok "the erased project's .projeny file survives"
+else
+    fail "the erased project's .projeny file survives" \
+         "ls: $(ls -A "$T295")"
+fi
+if [ ! -e "$T295/.bar.projeny.status" ]; then
+    ok "bar.projeny's status file is gone"
+else
+    fail "bar.projeny's status file is gone" "ls: $(ls -A "$T295")"
+fi
+if [ ! -d "$T295/foo" ]; then
+    ok "the old foo checkout is gone"
+else
+    fail "the old foo checkout is gone" "unexpected foo/"
+fi
+expect_file_contains "the new file names bar as the checkout" \
+    "$T295/foo.projeny" "Name: bar"
+expect_file_contains "the fresh checkout holds the bar content" \
+    "$T295/bar/README" "bar readme"
+if [ -f "$T295/.foo.projeny.status" ]; then
+    ok "the recreated project has a status file"
+else
+    fail "the recreated project has a status file" "ls: $(ls -A "$T295")"
+fi
+
+# ------------- 296. the corner: bar/ with NO bar.projeny never goes
+# Even --force --force refuses: an unattributable directory is never
+# removed, and nothing is created.
+T296="$ROOT/t296"
+make_tarballs "$T296" fake
+mkdir -p "$T296/bar/src"
+printf 'bar readme\n' > "$T296/bar/README"
+(cd "$T296" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+mkdir -p "$T296/bar"
+printf 'keep me\n' > "$T296/bar/keepme"
+out="$(run_in "$T296" "$PROJENY" create foo.projeny --origname bar \
+    --force --force bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "the unattributable corner refuses even --force --force"
+else
+    fail "the unattributable corner refuses even --force --force" \
+         "out: $out"
+fi
+case "$out" in
+*"'$T296/bar' exists but is not the checkout of '$T296/bar.projeny' (or there is no such file); refusing to remove it"*)
+    ok "the refusal words the attribution failure exactly"
+    ;;
+*)
+    fail "the refusal words the attribution failure exactly" "out: $out"
+    ;;
+esac
+if [ "$(cat "$T296/bar/keepme" 2>/dev/null)" = "keep me" ] && \
+   [ ! -e "$T296/foo.projeny" ]; then
+    ok "the directory survives and nothing was created"
+else
+    fail "the directory survives and nothing was created" \
+         "ls: $(ls -A "$T296")"
+fi
+
+# ------------- 297. the corner: bar.projeny whose Name: differs never
+# loses its sibling directory to the create. The sibling parses cleanly
+# and is a real project — but its checkout is named elsewhere/, so bar/ is
+# not attributable and is refused at any force level.
+T297="$ROOT/t297"
+make_tarballs "$T297" fake
+mkdir -p "$T297/bar/src"
+printf 'bar readme\n' > "$T297/bar/README"
+(cd "$T297" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+printf 'Archive: bar-1.0.tar.gz\nOrigname: bar\nName: elsewhere\n\n    A project whose checkout is NOT bar.\n\n' \
+    > "$T297/bar.projeny"
+run_in "$T297" expect_ok "the mismatched-sibling fixture sets up" \
+    "$PROJENY" setup bar.projeny
+mkdir -p "$T297/bar"
+printf 'keep me\n' > "$T297/bar/keepme"
+out="$(run_in "$T297" "$PROJENY" create foo.projeny --origname bar \
+    --force --force bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "a sibling whose Name differs refuses the attribution"
+else
+    fail "a sibling whose Name differs refuses the attribution" "out: $out"
+fi
+case "$out" in
+*"exists but is not the checkout of"*)
+    ok "the refusal is the attribution failure"
+    ;;
+*)
+    fail "the refusal is the attribution failure" "out: $out"
+    ;;
+esac
+if [ "$(cat "$T297/bar/keepme" 2>/dev/null)" = "keep me" ] && \
+   [ -d "$T297/elsewhere" ]; then
+    ok "bar/ and the sibling's own checkout are untouched"
+else
+    fail "bar/ and the sibling's own checkout are untouched" \
+         "ls: $(ls -A "$T297")"
+fi
+
+# ------------- 298. the checkout-directory validation in resolution
+# A directory arg next to a <dir>.projeny sibling resolves only when the
+# sibling's Name: matches the directory's basename (the checkout is always
+# named by Name:); a mismatch refuses status and setup, a matching sibling
+# works as before, and a git-conflicted sibling keeps falling through to
+# setup's own recovery.
+T298="$ROOT/t298"
+make_tarballs "$T298" fake
+printf 'Archive: fake-1.0.tar.gz\nOrigname: fake-1.0\nName: elsewhere\n\n    A project whose checkout is named elsewhere.\n\n' \
+    > "$T298/odd.projeny"
+run_in "$T298" expect_ok "the mismatched sibling sets up elsewhere/" \
+    "$PROJENY" setup odd.projeny
+mkdir -p "$T298/odd"
+printf 'not a checkout\n' > "$T298/odd/keepme"
+out="$(run_in "$T298" "$PROJENY" status odd/ 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "status on a mismatched sibling directory refuses"
+else
+    fail "status on a mismatched sibling directory refuses" "out: $out"
+fi
+case "$out" in
+*"'odd.projeny' names the checkout directory 'elsewhere', not 'odd'"*)
+    ok "the resolution refusal words the mismatch exactly"
+    ;;
+*)
+    fail "the resolution refusal words the mismatch exactly" "out: $out"
+    ;;
+esac
+run_in "$T298" expect_fail "setup refuses the mismatched sibling too" \
+    "$PROJENY" setup odd/
+if [ "$(cat "$T298/odd/keepme" 2>/dev/null)" = "not a checkout" ]; then
+    ok "the mismatched directory was not touched"
+else
+    fail "the mismatched directory was not touched" "ls: $(ls -A "$T298")"
+fi
+# The matching case: a real checkout directory resolves as always.
+printf 'Archive: fake-1.0.tar.gz\nOrigname: fake-1.0\nName: match\n\n    A matching project.\n\n' \
+    > "$T298/match.projeny"
+run_in "$T298" expect_ok "the matching sibling sets up" "$PROJENY" \
+    setup match.projeny
+run_in "$T298" expect_ok "status on the matching checkout directory works" \
+    "$PROJENY" status match/
+run_in "$T298" expect_ok "setup on the matching checkout directory works" \
+    "$PROJENY" setup match/
+# The git-conflicted sibling: markers make the file unparseable, so the
+# resolver falls back to the old behavior and setup runs its own recovery
+# (the same hand-made-marker technique the conflict sections use).
+mkdir -p "$T298/cfw/cf-1.0/src"
+printf 'alpha 1\nbeta 1\ngamma 1\ndelta 1\n' > "$T298/cfw/cf-1.0/src/a.c"
+(cd "$T298/cfw" && tar -czf cf-1.0.tar.gz cf-1.0 && rm -rf cf-1.0)
+printf 'Archive: cf-1.0.tar.gz\nOrigname: cf-1.0\nName: cf\n\n    Cf.\n' \
+    > "$T298/cfw/cf.projeny"
+(cd "$T298/cfw" && "$PROJENY" setup cf.projeny >/dev/null 2>&1)
+python3 - "$T298/cfw/cf/src/a.c" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace("gamma 1", "gamma LOCAL")
+open(p, "w").write(s)
+PYEOF
+(cd "$T298/cfw" && "$PROJENY" commit cf.projeny >/dev/null 2>&1)
+cp "$T298/cfw/cf.projeny" "$ROOT/t298-local.projeny"
+# upstream twin: same base, the same region changed the other way.
+U298="$ROOT/t298up"
+mkdir -p "$U298"
+cp "$T298/cfw/cf-1.0.tar.gz" "$U298/"
+cp "$ROOT/t298-local.projeny" "$U298/cf.projeny"
+(cd "$U298" && "$PROJENY" setup cf.projeny >/dev/null 2>&1)
+python3 - "$U298/cf/src/a.c" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace("gamma LOCAL", "gamma UPSTREAM")
+open(p, "w").write(s)
+PYEOF
+(cd "$U298" && "$PROJENY" commit cf.projeny >/dev/null 2>&1)
+cp "$U298/cf.projeny" "$ROOT/t298-up.projeny"
+make_conflicted "$ROOT/t298-local.projeny" "$ROOT/t298-up.projeny" \
+    "$T298/cfw/cf.projeny"
+out="$(run_in "$T298/cfw" "$PROJENY" setup cf/ 2>&1)"
+rc=$?
+if [ $rc -ne 0 ] && [ "$(echo "$out" | grep -c 'names the checkout directory')" -eq 0 ]; then
+    ok "a conflicted sibling falls through to setup's recovery (nonzero)"
+else
+    fail "a conflicted sibling falls through to setup's recovery (nonzero)" \
+         "exit=$rc out: $out"
+fi
+if cmp -s "$T298/cfw/cf.projeny" "$ROOT/t298-up.projeny"; then
+    ok "the conflicted setup took the upstream bytes"
+else
+    fail "the conflicted setup took the upstream bytes" \
+         "$(cat "$T298/cfw/cf.projeny")"
+fi
+expect_file_contains "the recovered checkout has workdir markers" \
+    "$T298/cfw/cf/src/a.c" "<<<<<<<"
+
+# ------------- 299. create argument errors
+# Every malformed argument combination dies before anything is created.
+T299="$ROOT/t299"
+make_tarballs "$T299" fake
+h299="$("$PROJENY" hash "$T299/fake-2.0.tar.gz")"
+out="$(run_in "$T299" "$PROJENY" create nope.tar.gz fake-1.0.tar.gz 2>&1)"
+if [ $? -ne 0 ]; then ok "a target without the .projeny suffix refuses"; else fail "a target without the .projeny suffix refuses" "out: $out"; fi
+case "$out" in
+*"'nope.tar.gz' does not end in '.projeny'"*)
+    ok "the suffix error names the argument"
+    ;;
+*)
+    fail "the suffix error names the argument" "out: $out"
+    ;;
+esac
+out="$(run_in "$T299" "$PROJENY" create nodir/foo.projeny fake-1.0.tar.gz 2>&1)"
+if [ $? -ne 0 ]; then ok "a missing pdir refuses"; else fail "a missing pdir refuses" "out: $out"; fi
+case "$out" in
+*"'nodir' does not exist"*)
+    ok "the pdir error names the directory"
+    ;;
+*)
+    fail "the pdir error names the directory" "out: $out"
+    ;;
+esac
+run_in "$T299" expect_fail "an empty stem refuses" \
+    "$PROJENY" create .projeny fake-1.0.tar.gz
+run_in "$T299" expect_fail "--comment without a value refuses" \
+    "$PROJENY" create foo.projeny fake-1.0.tar.gz --comment
+run_in "$T299" expect_fail "--origname without a value refuses" \
+    "$PROJENY" create foo.projeny --origname fake-1.0.tar.gz
+out="$(run_in "$T299" "$PROJENY" create foo.projeny --bogus fake-1.0.tar.gz 2>&1)"
+if [ $? -ne 0 ]; then ok "an unknown option refuses"; else fail "an unknown option refuses" "out: $out"; fi
+case "$out" in
+*"unknown option '--bogus'"*)
+    ok "the unknown-option error names the option"
+    ;;
+*)
+    fail "the unknown-option error names the option" "out: $out"
+    ;;
+esac
+run_in "$T299" expect_fail "-c is not accepted" \
+    "$PROJENY" create foo.projeny -c2 fake-1.0.tar.gz
+run_in "$T299" expect_fail "-j is not accepted" \
+    "$PROJENY" create foo.projeny -j4 fake-1.0.tar.gz
+run_in "$T299" expect_fail "create with one positional is a usage error" \
+    "$PROJENY" create foo.projeny
+run_in "$T299" expect_fail "two tarball paths refuse" \
+    "$PROJENY" create foo.projeny fake-1.0.tar.gz fake-2.0.tar.gz
+out="$(run_in "$T299" "$PROJENY" create foo.projeny fake-1.0.tar.gz fake-2.0.tar.gz 2>&1)"
+case "$out" in
+*"create takes exactly one new tarball path"*)
+    ok "the two-tarball refusal is the shared grammar's wording"
+    ;;
+*)
+    fail "the two-tarball refusal is the shared grammar's wording" \
+         "out: $out"
+    ;;
+esac
+run_in "$T299" expect_fail "a hash before any URL refuses" \
+    "$PROJENY" create foo.projeny "$h299" "file://$T299/fake-2.0.tar.gz"
+out="$(run_in "$T299" "$PROJENY" create foo.projeny \
+    "file://$T299/fake-2.0.tar.gz" zzz 2>&1)"
+if [ $? -ne 0 ]; then ok "a non-hash tail after a URL refuses"; else fail "a non-hash tail after a URL refuses" "out: $out"; fi
+case "$out" in
+*"invalid blake3 hash 'zzz'"*)
+    ok "the non-hash tail error names the bad hash"
+    ;;
+*)
+    fail "the non-hash tail error names the bad hash" "out: $out"
+    ;;
+esac
+run_in "$T299" expect_fail "two hashes in a row refuse" \
+    "$PROJENY" create foo.projeny "file://$T299/fake-2.0.tar.gz" "$h299" "$h299"
+if [ ! -e "$T299/foo.projeny" ] && [ ! -e "$T299/.foo.projeny.status" ] && \
+   [ ! -e "$T299/.fake-2.0.tar.gz.snapshot" ] && [ ! -e "$T299/foo" ]; then
+    ok "the argument errors wrote nothing"
+else
+    fail "the argument errors wrote nothing" "ls: $(ls -A "$T299")"
+fi
+
+# ------------- 300. a dead URL --force leaves the old project untouched
+# The download+verify runs BEFORE any erase: a --force create whose only
+# URL cannot be downloaded dies with "(nothing was changed)" — and that
+# claim is literal — the old checkout, status file, and .projeny bytes all
+# survive, and no snapshot is written for the dead URL.
+T300="$ROOT/t300"
+make_tarballs "$T300" fake
+run_in "$T300" expect_ok "the dead-URL fixture creates" "$PROJENY" \
+    create foo.projeny fake-1.0.tar.gz
+cp "$T300/foo.projeny" "$T300/keep.projeny"
+cp "$T300/foo/README" "$T300/keep-readme"
+h300="$("$PROJENY" hash "$T300/fake-1.0.tar.gz")"
+out="$(run_in "$T300" "$PROJENY" create foo.projeny --force \
+    "file://$T300/nonexistent.tar.gz" "$h300" 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "a dead URL refuses the --force create"
+else
+    fail "a dead URL refuses the --force create" "out: $out"
+fi
+case "$out" in
+*"no URL argument produced a verified download; not creating '$T300/foo.projeny' (nothing was changed)"*)
+    ok "the refusal claims nothing was changed"
+    ;;
+*)
+    fail "the refusal claims nothing was changed" "out: $out"
+    ;;
+esac
+case "$out" in
+*"could not download 'file://$T300/nonexistent.tar.gz'"*)
+    ok "the dead mirror only warns before the refusal"
+    ;;
+*)
+    fail "the dead mirror only warns before the refusal" "out: $out"
+    ;;
+esac
+if cmp -s "$T300/foo.projeny" "$T300/keep.projeny"; then
+    ok "the old .projeny file is byte-unchanged"
+else
+    fail "the old .projeny file is byte-unchanged" \
+         "the create rewrote or erased it"
+fi
+if cmp -s "$T300/foo/README" "$T300/keep-readme"; then
+    ok "the old checkout is untouched"
+else
+    fail "the old checkout is untouched" "the create erased the setup state"
+fi
+if [ -f "$T300/.foo.projeny.status" ]; then
+    ok "the old status file is untouched"
+else
+    fail "the old status file is untouched" "the create erased it"
+fi
+if [ ! -e "$T300/.nonexistent.tar.gz.snapshot" ]; then
+    ok "no snapshot was written for the dead URL"
+else
+    fail "no snapshot was written for the dead URL" \
+         "unexpected .nonexistent.tar.gz.snapshot"
+fi
+
+# ------------- 301. a grammar error with --force leaves the old project
+# The archive-argument grammar is parsed before any erase: two tarball
+# paths die with the shared grammar's wording and the old checkout, status
+# file, and .projeny bytes all survive.
+T301="$ROOT/t301"
+make_tarballs "$T301" fake
+run_in "$T301" expect_ok "the grammar fixture creates" "$PROJENY" \
+    create foo.projeny fake-1.0.tar.gz
+cp "$T301/foo.projeny" "$T301/keep.projeny"
+cp "$T301/foo/README" "$T301/keep-readme"
+out="$(run_in "$T301" "$PROJENY" create foo.projeny --force \
+    fake-1.0.tar.gz fake-2.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "two tarball paths refuse even with --force"
+else
+    fail "two tarball paths refuse even with --force" "out: $out"
+fi
+case "$out" in
+*"create takes exactly one new tarball path"*)
+    ok "the refusal is the shared grammar's wording"
+    ;;
+*)
+    fail "the refusal is the shared grammar's wording" "out: $out"
+    ;;
+esac
+if cmp -s "$T301/foo.projeny" "$T301/keep.projeny"; then
+    ok "the grammar refusal leaves the file byte-unchanged"
+else
+    fail "the grammar refusal leaves the file byte-unchanged" \
+         "the create rewrote or erased it"
+fi
+if cmp -s "$T301/foo/README" "$T301/keep-readme" && \
+   [ -f "$T301/.foo.projeny.status" ]; then
+    ok "the grammar refusal leaves the checkout and status intact"
+else
+    fail "the grammar refusal leaves the checkout and status intact" \
+         "the create erased the setup state"
+fi
+
+# ------------- 302. an --origname mismatch copies nothing
+# The Origname is inferred from the SOURCE tarball and matched BEFORE any
+# copy: with the tarball in a sibling directory, the refusal leaves the
+# pdir without the tarball (the old order copied it first and left it
+# behind).
+T302="$ROOT/t302"
+make_tarballs "$T302/dl" fake
+out="$(run_in "$T302" "$PROJENY" create foo.projeny --origname bar \
+    dl/fake-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "an --origname mismatch with a sibling tarball refuses"
+else
+    fail "an --origname mismatch with a sibling tarball refuses" "out: $out"
+fi
+case "$out" in
+*"the archive 'dl/fake-1.0.tar.gz' unpacks to 'fake-1.0', not 'bar' (setup requires them to match)"*)
+    ok "the refusal words the mismatch exactly"
+    ;;
+*)
+    fail "the refusal words the mismatch exactly" "out: $out"
+    ;;
+esac
+if [ ! -e "$T302/fake-1.0.tar.gz" ] && [ ! -e "$T302/foo.projeny" ] && \
+   [ ! -e "$T302/.foo.projeny.status" ] && [ ! -e "$T302/foo" ]; then
+    ok "the pdir holds no copied tarball and no .projeny file"
+else
+    fail "the pdir holds no copied tarball and no .projeny file" \
+         "ls: $(ls -A "$T302")"
+fi
+if [ -f "$T302/dl/fake-1.0.tar.gz" ]; then
+    ok "the source tarball is still in its sibling directory"
+else
+    fail "the source tarball is still in its sibling directory" \
+         "ls: $(ls -A "$T302/dl")"
+fi
+
+# ------------- 303. the guard's eviction vs a dirty attributable bar
+# At one --force the guard's eviction goes through the same no-force check
+# as any erase-setup: a dirty bar refuses the whole create (erase-setup's
+# own wording) and bar/ keeps its uncommitted edit. At --force --force the
+# eviction is unconditional — but only after every fallible check passed:
+# with a missing tarball the create dies BEFORE any erase and bar/ still
+# keeps its edit; with a good tarball the dirty work is discarded and the
+# create proceeds.
+T303="$ROOT/t303"
+make_tarballs "$T303" fake
+mkdir -p "$T303/bar/src"
+printf 'bar readme\n' > "$T303/bar/README"
+printf 'int bar = 1;\n' > "$T303/bar/src/a.c"
+(cd "$T303" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+printf 'Archive: fake-1.0.tar.gz\nOrigname: fake-1.0\nName: bar\n\n    Bar project.\n\n' \
+    > "$T303/bar.projeny"
+run_in "$T303" expect_ok "the bar.projeny fixture sets up" "$PROJENY" \
+    setup bar.projeny
+printf 'bar readme edited\n' >> "$T303/bar/README"
+out="$(run_in "$T303" "$PROJENY" create foo.projeny --origname bar --force \
+    bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "one --force refuses the dirty attributable bar"
+else
+    fail "one --force refuses the dirty attributable bar" "out: $out"
+fi
+case "$out" in
+*"refusing to erase 1 of 1 project(s) with uncommitted changes (use --force to erase anyway)"*)
+    ok "the refusal is erase-setup's no-force wording"
+    ;;
+*)
+    fail "the refusal is erase-setup's no-force wording" "out: $out"
+    ;;
+esac
+case "$out" in
+*"'bar.projeny': modified: 'README'"*)
+    ok "the refusal names bar.projeny and its change"
+    ;;
+*)
+    fail "the refusal names bar.projeny and its change" "out: $out"
+    ;;
+esac
+if grep -q "bar readme edited" "$T303/bar/README" && \
+   [ ! -e "$T303/foo.projeny" ] && [ -f "$T303/.bar.projeny.status" ]; then
+    ok "the dirty refusal leaves bar/ and the pdir untouched"
+else
+    fail "the dirty refusal leaves bar/ and the pdir untouched" \
+         "ls: $(ls -A "$T303")"
+fi
+out="$(run_in "$T303" "$PROJENY" create foo.projeny --origname bar --force \
+    --force nope.tar.gz 2>&1)"
+rc=$?
+if [ $rc -ne 0 ]; then
+    ok "a missing tarball refuses the double-force create"
+else
+    fail "a missing tarball refuses the double-force create" "out: $out"
+fi
+case "$out" in
+*"tarball 'nope.tar.gz' does not exist"*)
+    ok "the missing-tarball refusal names the tarball"
+    ;;
+*)
+    fail "the missing-tarball refusal names the tarball" "out: $out"
+    ;;
+esac
+if grep -q "bar readme edited" "$T303/bar/README" && \
+   [ ! -e "$T303/foo.projeny" ] && [ -f "$T303/.bar.projeny.status" ]; then
+    ok "the missing-tarball refusal erased nothing"
+else
+    fail "the missing-tarball refusal erased nothing" "ls: $(ls -A "$T303")"
+fi
+run_in "$T303" expect_ok "the double-force create over the dirty bar" \
+    "$PROJENY" create foo.projeny --origname bar --force --force \
+    bar-1.0.tar.gz
+expect_file_not_contains "the dirty edit was discarded" \
+    "$T303/bar/README" "bar readme edited"
+expect_file_contains "the fresh checkout holds the bar content" \
+    "$T303/bar/README" "bar readme"
+expect_file_contains "the new file names bar as the checkout" \
+    "$T303/foo.projeny" "Name: bar"
+if [ ! -e "$T303/.bar.projeny.status" ]; then
+    ok "the eviction erased bar.projeny's status file"
+else
+    fail "the eviction erased bar.projeny's status file" \
+         "unexpected .bar.projeny.status"
+fi
+
+# ------------- 304. --erase-snapshots passes through to the guard's erase
+# The corner guard's eviction erase honors --erase-snapshots exactly like
+# the existing-file erase does: bar.projeny's snapshot (the one its next
+# setup would use) is removed only when the flag is given.
+T304="$ROOT/t304"
+make_tarballs "$T304/keep" fake
+mkdir -p "$T304/keep/bar/src"
+printf 'bar readme\n' > "$T304/keep/bar/README"
+printf 'int bar = 1;\n' > "$T304/keep/bar/src/a.c"
+(cd "$T304/keep" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+printf 'Archive: fake-1.0.tar.gz\nOrigname: fake-1.0\nName: bar\n\n    Bar project.\n\n' \
+    > "$T304/keep/bar.projeny"
+run_in "$T304/keep" expect_ok "the keep fixture sets up bar.projeny" \
+    "$PROJENY" setup bar.projeny
+if [ -f "$T304/keep/.fake-1.0.tar.gz.snapshot" ]; then
+    ok "bar.projeny's snapshot is in place"
+else
+    fail "bar.projeny's snapshot is in place" "ls: $(ls -A "$T304/keep")"
+fi
+run_in "$T304/keep" expect_ok "the guard create without --erase-snapshots" \
+    "$PROJENY" create foo.projeny --origname bar --force bar-1.0.tar.gz
+if [ -f "$T304/keep/.fake-1.0.tar.gz.snapshot" ]; then
+    ok "the guard's erase kept bar.projeny's snapshot"
+else
+    fail "the guard's erase kept bar.projeny's snapshot" \
+         "ls: $(ls -A "$T304/keep")"
+fi
+if [ -f "$T304/keep/.bar-1.0.tar.gz.snapshot" ]; then
+    ok "the new project's snapshot is in place"
+else
+    fail "the new project's snapshot is in place" \
+         "ls: $(ls -A "$T304/keep")"
+fi
+make_tarballs "$T304/erase" fake
+mkdir -p "$T304/erase/bar/src"
+printf 'bar readme\n' > "$T304/erase/bar/README"
+printf 'int bar = 1;\n' > "$T304/erase/bar/src/a.c"
+(cd "$T304/erase" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+printf 'Archive: fake-1.0.tar.gz\nOrigname: fake-1.0\nName: bar\n\n    Bar project.\n\n' \
+    > "$T304/erase/bar.projeny"
+run_in "$T304/erase" expect_ok "the erase fixture sets up bar.projeny" \
+    "$PROJENY" setup bar.projeny
+run_in "$T304/erase" expect_ok \
+    "the guard create with --erase-snapshots" "$PROJENY" \
+    create foo.projeny --origname bar --force --erase-snapshots \
+    bar-1.0.tar.gz
+if [ ! -e "$T304/erase/.fake-1.0.tar.gz.snapshot" ]; then
+    ok "--erase-snapshots removed bar.projeny's snapshot"
+else
+    fail "--erase-snapshots removed bar.projeny's snapshot" \
+         "unexpected .fake-1.0.tar.gz.snapshot"
+fi
+if [ -f "$T304/erase/.bar-1.0.tar.gz.snapshot" ]; then
+    ok "the new project's snapshot is in place (--erase-snapshots too)"
+else
+    fail "the new project's snapshot is in place (--erase-snapshots too)" \
+         "ls: $(ls -A "$T304/erase")"
+fi
+expect_file_contains "the fresh bar checkout holds the bar content" \
+    "$T304/erase/bar/README" "bar readme"
+
+# ------------- 305. the corner re-run: --force over its own checkout
+# create foo.projeny --origname bar puts the checkout in bar/ while the
+# file stays foo.projeny. Re-running the IDENTICAL command with --force
+# used to die: the guard only asked the (absent) bar.projeny who owned
+# bar/. The replaced file itself is now considered first — its Name: is
+# bar, so its own erase removes bar/ and the create proceeds;
+# --force --force does the same unconditionally.
+T305="$ROOT/t305"
+make_tarballs "$T305" fake
+mkdir -p "$T305/bar/src"
+printf 'bar readme\n' > "$T305/bar/README"
+printf 'int bar = 1;\n' > "$T305/bar/src/a.c"
+(cd "$T305" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+run_in "$T305" expect_ok "the re-run fixture creates" "$PROJENY" \
+    create foo.projeny --origname bar bar-1.0.tar.gz
+out="$(run_in "$T305" "$PROJENY" create foo.projeny --origname bar \
+    --force bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "the identical create re-run with --force exits 0"
+else
+    fail "the identical create re-run with --force exits 0" \
+         "exit=$rc out: $out"
+fi
+case "$out" in
+*"[foo.projeny] erased setup state for 'bar'"*)
+    ok "the re-run erased the replaced project's own setup state"
+    ;;
+*)
+    fail "the re-run erased the replaced project's own setup state" \
+         "out: $out"
+    ;;
+esac
+case "$out" in
+*"exists but is not the checkout of"*)
+    fail "the re-run is not the guard's attribution refusal" "out: $out"
+    ;;
+*)
+    ok "the re-run is not the guard's attribution refusal"
+    ;;
+esac
+expect_file_contains "the re-run overwrote the file in place" \
+    "$T305/foo.projeny" "Name: bar"
+expect_file_contains "the re-run recreated the checkout from the archive" \
+    "$T305/bar/README" "bar readme"
+expect_file_contains "the recreated checkout holds the tarball's content" \
+    "$T305/bar/src/a.c" "int bar = 1;"
+if [ -f "$T305/.foo.projeny.status" ]; then
+    ok "the re-run wrote a fresh status file"
+else
+    fail "the re-run wrote a fresh status file" "ls: $(ls -A "$T305")"
+fi
+if [ ! -e "$T305/foo.projeny.status" ] && \
+   [ ! -e "$T305/.foo.projeny.status.stale" ]; then
+    ok "the re-run left no status-file junk behind"
+else
+    fail "the re-run left no status-file junk behind" \
+         "ls: $(ls -A "$T305")"
+fi
+run_in "$T305" expect_ok "the recreated project is clean" "$PROJENY" \
+    status foo.projeny
+out="$(run_in "$T305" "$PROJENY" create foo.projeny --origname bar \
+    --force --force bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "the identical create re-run with --force --force exits 0"
+else
+    fail "the identical create re-run with --force --force exits 0" \
+         "exit=$rc out: $out"
+fi
+expect_file_contains "the double-force re-run recreated the checkout" \
+    "$T305/bar/README" "bar readme"
+if [ -f "$T305/.foo.projeny.status" ]; then
+    ok "the double-force re-run wrote a fresh status file"
+else
+    fail "the double-force re-run wrote a fresh status file" \
+         "ls: $(ls -A "$T305")"
+fi
+
+# ------------- 306. the corner re-run over a competing sibling + warning
+# bar.projeny owns bar/ when `create foo.projeny --origname bar --force`
+# first evicts it: the guard's sibling attribution fires, and the leftover
+# bar.projeny still carries Name: bar (projeny never deletes .projeny
+# files), so the create warns that it still names a checkout directory the
+# new file now owns. Re-running the same create then attributes bar/ to
+# the replaced foo.projeny itself (its Name: is bar), so no second
+# eviction happens — and the warning still fires, because bar.projeny
+# still claims the name.
+T306="$ROOT/t306"
+make_tarballs "$T306" fake
+mkdir -p "$T306/bar/src"
+printf 'bar readme\n' > "$T306/bar/README"
+printf 'int bar = 1;\n' > "$T306/bar/src/a.c"
+(cd "$T306" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+printf 'Archive: bar-1.0.tar.gz\nOrigname: bar\nName: bar\n\n    Bar project.\n\n' \
+    > "$T306/bar.projeny"
+run_in "$T306" expect_ok "the competing-sibling fixture sets up" \
+    "$PROJENY" setup bar.projeny
+out="$(run_in "$T306" "$PROJENY" create foo.projeny --origname bar \
+    --force bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "the evicting create exits 0"
+else
+    fail "the evicting create exits 0" "exit=$rc out: $out"
+fi
+case "$out" in
+*"[bar.projeny] erased setup state for 'bar'"*)
+    ok "the guard evicted bar.projeny's setup state"
+    ;;
+*)
+    fail "the guard evicted bar.projeny's setup state" "out: $out"
+    ;;
+esac
+case "$out" in
+*"'$T306/bar.projeny' still names the checkout directory 'bar', which now belongs to '$T306/foo.projeny'; remove or rename '$T306/bar.projeny' if it is no longer wanted"*)
+    ok "the create warns about the leftover bar.projeny"
+    ;;
+*)
+    fail "the create warns about the leftover bar.projeny" "out: $out"
+    ;;
+esac
+if [ -f "$T306/bar.projeny" ]; then
+    ok "the leftover bar.projeny is never deleted"
+else
+    fail "the leftover bar.projeny is never deleted" \
+         "ls: $(ls -A "$T306")"
+fi
+if [ ! -e "$T306/.bar.projeny.status" ] && \
+   [ "$(cat "$T306/bar/README" 2>/dev/null)" = "bar readme" ]; then
+    ok "the eviction erased bar.projeny's status and recreated bar/"
+else
+    fail "the eviction erased bar.projeny's status and recreated bar/" \
+         "ls: $(ls -A "$T306")"
+fi
+out="$(run_in "$T306" "$PROJENY" create foo.projeny --origname bar \
+    --force bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "the re-run over the competing sibling exits 0"
+else
+    fail "the re-run over the competing sibling exits 0" \
+         "exit=$rc out: $out"
+fi
+case "$out" in
+*"[bar.projeny] erased setup state"*)
+    fail "the re-run does not evict bar.projeny again" "out: $out"
+    ;;
+*)
+    ok "the re-run does not evict bar.projeny again"
+    ;;
+esac
+case "$out" in
+*"erased setup state for 'bar'"*)
+    ok "the re-run erased the replaced foo.projeny's own setup state"
+    ;;
+*)
+    fail "the re-run erased the replaced foo.projeny's own setup state" \
+         "out: $out"
+    ;;
+esac
+case "$out" in
+*"'$T306/bar.projeny' still names the checkout directory 'bar'"*)
+    ok "the re-run still warns about the leftover bar.projeny"
+    ;;
+*)
+    fail "the re-run still warns about the leftover bar.projeny" \
+         "out: $out"
+    ;;
+esac
+if [ -f "$T306/bar.projeny" ] && [ -f "$T306/.foo.projeny.status" ] && \
+   [ "$(cat "$T306/bar/README" 2>/dev/null)" = "bar readme" ]; then
+    ok "the final state: sibling file, status, and checkout all correct"
+else
+    fail "the final state: sibling file, status, and checkout all correct" \
+         "ls: $(ls -A "$T306")"
+fi
+
+# ------------- 307. no leftover-sibling warning without a competitor
+# The warning names a real problem: a leftover .projeny file that still
+# claims the checkout name. With no <name>.projeny sibling anywhere, the
+# same create (first run and --force re-run alike) says nothing about it.
+T307="$ROOT/t307"
+make_tarballs "$T307" fake
+mkdir -p "$T307/bar/src"
+printf 'bar readme\n' > "$T307/bar/README"
+printf 'int bar = 1;\n' > "$T307/bar/src/a.c"
+(cd "$T307" && tar -czf bar-1.0.tar.gz bar && rm -rf bar)
+out="$(run_in "$T307" "$PROJENY" create foo.projeny --origname bar \
+    bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "the no-competitor fixture creates"
+else
+    fail "the no-competitor fixture creates" "exit=$rc out: $out"
+fi
+case "$out" in
+*"still names the checkout directory"*)
+    fail "the first create warns nothing without a competitor" \
+         "out: $out"
+    ;;
+*)
+    ok "the first create warns nothing without a competitor"
+    ;;
+esac
+out="$(run_in "$T307" "$PROJENY" create foo.projeny --origname bar \
+    --force bar-1.0.tar.gz 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "the no-competitor re-run exits 0"
+else
+    fail "the no-competitor re-run exits 0" "exit=$rc out: $out"
+fi
+case "$out" in
+*"still names the checkout directory"*)
+    fail "the no-competitor re-run warns nothing about leftovers" \
+         "out: $out"
+    ;;
+*)
+    ok "the no-competitor re-run warns nothing about leftovers"
+    ;;
+esac
+if [ ! -e "$T307/bar.projeny" ]; then
+    ok "no competing sibling exists in the pdir"
+else
+    fail "no competing sibling exists in the pdir" "ls: $(ls -A "$T307")"
+fi
+
+# ------------- 308. the stale-state pin: a hash-verified snapshot survives
+# A URL snapshot that the file's own URL: headers verify is NOT stale state
+# from a removed checkout: erase-setup WITHOUT --erase-snapshots removes
+# the workdir and the status file but keeps the snapshot, and the next
+# setup re-uses it — downloading nothing (with the source tarball deleted,
+# the kept snapshot is the only possible source) and leaving it under its
+# original dotted name, never renamed to .stale.
+T308="$ROOT/t308"
+make_tarballs "$T308" fake
+h308="$("$PROJENY" hash "$T308/fake-1.0.tar.gz")"
+run_in "$T308" expect_ok "the stale-pin fixture creates from the URL" \
+    "$PROJENY" create foo.projeny "file://$T308/fake-1.0.tar.gz" "$h308"
+if [ -f "$T308/.fake-1.0.tar.gz.snapshot" ]; then
+    ok "the create wrote the snapshot"
+else
+    fail "the create wrote the snapshot" "ls: $(ls -A "$T308")"
+fi
+rm "$T308/fake-1.0.tar.gz"
+run_in "$T308" expect_ok "erase-setup without --erase-snapshots" \
+    "$PROJENY" erase-setup foo.projeny
+if [ ! -e "$T308/foo" ] && [ ! -e "$T308/.foo.projeny.status" ] && \
+   [ -f "$T308/.fake-1.0.tar.gz.snapshot" ]; then
+    ok "the erase removed the workdir and status but kept the snapshot"
+else
+    fail "the erase removed the workdir and status but kept the snapshot" \
+         "ls: $(ls -A "$T308")"
+fi
+out="$(run_in "$T308" "$PROJENY" setup foo.projeny 2>&1)"
+rc=$?
+if [ $rc -eq 0 ]; then
+    ok "the setup after the erase exits 0"
+else
+    fail "the setup after the erase exits 0" "exit=$rc out: $out"
+fi
+case "$out" in
+*"downloading"*)
+    fail "the setup downloaded nothing" "out: $out"
+    ;;
+*)
+    ok "the setup downloaded nothing"
+    ;;
+esac
+case "$out" in
+*"using existing snapshot '$T308/.fake-1.0.tar.gz.snapshot'"*)
+    ok "the setup reports it used the kept snapshot"
+    ;;
+*)
+    fail "the setup reports it used the kept snapshot" "out: $out"
+    ;;
+esac
+if [ -f "$T308/.fake-1.0.tar.gz.snapshot" ] && \
+   [ ! -e "$T308/.fake-1.0.tar.gz.snapshot.stale" ] && \
+   [ ! -e "$T308/.fake-1.0.tar.gz.snapshot.stale2" ]; then
+    ok "the snapshot keeps its original dotted name (never .stale)"
+else
+    fail "the snapshot keeps its original dotted name (never .stale)" \
+         "ls: $(ls -A "$T308")"
+fi
+expect_file_contains "the re-setup checkout holds the tarball's content" \
+    "$T308/foo/README" "hello v1"
+run_in "$T308" expect_ok "the re-set-up project is clean" "$PROJENY" \
+    status foo.projeny
 
 # ------------------------------------------------------------- summary
 echo "---"

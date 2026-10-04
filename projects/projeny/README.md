@@ -26,7 +26,12 @@ sibling exists — typically the checkout directory before it was ever
 created, or a bare name like `lua` for `lua.projeny`. The work-tree
 sibling rule wins over the scan: a directory sitting next to a
 `<dir>.projeny` file IS that project's workdir, even when it holds stray
-`.projeny` files of its own. Relative arguments
+`.projeny` files of its own — but only when the file says so: its
+`Name:` header must equal the directory's basename, since the checkout
+is always named by `Name:`. On mismatch the command refuses
+(`'<dir>.projeny' names the checkout directory '<other>', not '<dir>'`);
+a sibling that cannot be parsed keeps the old behavior, so a
+git-conflicted `.projeny` still recovers through `setup`. Relative arguments
 are lexically normalized first, so from inside the work tree `.` names
 the project and, from a work tree subdirectory, `..` does too; an
 argument that exists on disk is resolved physically (symlinks and all),
@@ -46,6 +51,9 @@ projeny rm <f.projeny|dir> <path>           delete a file, mark as removed
 projeny mv <f.projeny|dir> <src> <dst>      rename a file, mark as renamed
 projeny resolve <f.projeny|dir> <path>      clear a conflict entry
 projeny rebase <f.projeny|dir> <tarball>    point the project at a new tarball
+projeny rebase <f.projeny|dir> <url> [<hash>]...   ...or at new URL: header(s)
+projeny create <f.projeny> <tarball>        make a new .projeny file and set it up
+projeny create <f.projeny> <url> [<hash>]...   ...or from new URL: header(s)
 projeny status <f.projeny|dir>              show setup/conflict/pending state
 projeny diff <f.projeny|dir>                print a checkout's uncommitted diff
 projeny diff <dir> <other-dir>              print the diff between two trees
@@ -70,7 +78,8 @@ erases several projects' setup state at once (see
 [Erasing a setup](#erasing-a-setup)). `setup`/`package`/`extract`/`download`
 are controlled with -j/--jobs and -c/--curl-jobs; `erase-setup` takes
 -j/--jobs plus the --erase-snapshots and --force flags (it has no download
-phase, so -c/--curl-jobs is an unknown option there); see
+phase, so -c/--curl-jobs is an unknown option there); `create` takes
+--comment, --origname, --force, and --erase-snapshots; see
 [Parallel setup, package, extract, and download](#parallel-setup-package-extract-and-download).
 
 Paths into the work tree may be CWD-relative, absolute, or workdir-relative
@@ -119,17 +128,122 @@ Paths into the work tree may be CWD-relative, absolute, or workdir-relative
   (`<<<<<<<`, `=======`, `>>>>>>>`, `|||||||`), projeny prints a warning to
   stderr but still resolves (warn, don't error), since committing markers
   would bake them into the patch.
-- `rebase <new-tarball>`: requires a clean tree (workdir matches the
+- `rebase <new-archive-args>`: requires a clean tree (workdir matches the
   current patch) and no pending conflicts. If never set up, it runs
-  `setup` first. It applies the current patch onto the new tarball,
-  rewrites `Archive:`/`Origname:`, regenerates the patch, and moves the
+  `setup` first. It applies the current patch onto the new base, rewrites
+  the archive-location headers, regenerates the patch, and moves the
   result into place; conflicts leave markers and are recorded in status.
   Pending add/rm/mv operations are preserved across the rebase (they are
   workdir-relative intent, still valid against the new base), matching how
-  `setup` merges keep them. If the new tarball's basename equals the
-  current `Archive:` but its content differs (size/hash compare), projeny
-  warns to stderr and proceeds with the new file — it never silently keeps
-  the old bytes.
+  `setup` merges keep them. The new-archive arguments take one of two
+  forms, decided by the FIRST argument: whether it is a URL is decided by
+  asking libcurl's URL parser (the `curl_url` API — the same parser that
+  would fetch it), so plain filenames, including `./x.tar.gz`, are never
+  mistaken for URLs while `http://`/`https://`/`ftp://`/`ftps://`/`file://`
+  arguments are.
+
+  - `rebase <f> <new-tarball>` (one local tarball path) keeps the project
+    Archive:-based: the tarball is copied next to the `.projeny` file and
+    `Archive:`/`Origname:` are rewritten. If the new tarball's basename
+    equals the current `Archive:` but its content differs (size/hash
+    compare), projeny warns to stderr and proceeds with the new file — it
+    never silently keeps the old bytes. A URL:-based project refuses this
+    form (it has no checked-in tarball); rebase it with URLs instead.
+  - `rebase <f> <url> [<hash>] [<url> [<hash>]...]` (one or more URLs,
+    each optionally followed by its blake3 hash — 64 hex chars, uppercase
+    accepted, the value `projeny hash <file>` prints) rebases onto those
+    URLs, which become the file's `URL:` headers, tried in order by later
+    setups. An Archive:-based project converts to URL:-based (the
+    `Archive:` header is replaced; remove the old checked-in tarball from
+    git by hand), and a URL:-based project accepts only this form. Every
+    listed URL is downloaded and verified during the rebase (each distinct
+    URL once, in order): an omitted hash is computed from the download and
+    reported (`projeny: computed blake3 hash <hash> for '<url>'`); a
+    provided hash that mismatches the download is a hard error (the hash
+    was asserted, so nothing is written); a hashless URL that cannot be
+    downloaded is a hard error (no hash could be computed — pass the hash
+    explicitly); and a hashed URL that fails to download only warns, the
+    mirror staying listed so a later `setup` falls through it as usual. If
+    no URL verifies, nothing is rebased and the `.projeny` file, status
+    file, snapshot, and workdir are all untouched. The first verified
+    download's bytes are written to the snapshot — named after the FIRST
+    URL's basename, matching what the `.projeny` parse derives — and are
+    the base the patch applies onto; the rest of the rebase flow (clean
+    tree, conflicts leave markers, `resolve` + `commit`) is unchanged.
+
+- `create <f.projeny> <new-archive-args> [--comment <text>] [--origname
+  <name>] [--force] [--erase-snapshots]`: creates a brand-new `.projeny`
+  file naming an archive, then runs `setup` on it — a new project is one
+  command away from a checked-out, patched work tree with a fresh status
+  file. Options may appear anywhere among the arguments. The first
+  argument is the `.projeny` file to create: it must end in `.projeny`
+  (the command refuses otherwise) and may carry a directory path; the
+  directory that would hold it (the pdir) must exist. Its name — the
+  basename minus `.projeny` — is the default `Name:` header, so the
+  checkout directory defaults to `<pdir>/<name>` next to the new file.
+  The remaining arguments name the archive with exactly `rebase`'s
+  grammar, decided by the FIRST argument (libcurl's URL parser decides
+  what a URL is; see the rebase bullet above):
+
+  - `create <f> <new-tarball>` gives the file an `Archive:` header and
+    copies the tarball next to it — rebase's exact behavior, including
+    the warn-and-use-the-new-file rule when the copy's basename matches
+    the replaced project's `Archive:` while its bytes differ.
+  - `create <f> <url> [<hash>] [<url> [<hash>]...]` writes the URLs as
+    the file's `URL:` headers (the project is born URL:-based — no
+    tarball is checked into git). Every listed URL is downloaded and
+    verified during the create, each distinct URL once: an omitted hash
+    is computed from the download and reported, a provided hash that
+    mismatches is a hard error, a hashless URL that cannot be downloaded
+    is a hard error, and a hashed URL that fails to download only warns
+    (the mirror stays listed). If no URL verifies, nothing is created.
+    The first verified download's bytes are written to the snapshot,
+    named after the FIRST URL's basename — the same derivation the
+    `.projeny` parse applies — so the setup below downloads nothing.
+
+  Headers are composed in the conventional order: the `Archive:`/`URL:`
+  lines, then `Origname:`, then `Name:`, followed by the prose.
+  `Origname:` is inferred from the archive itself: its single top-level
+  directory (an archive holding several is a hard error). `--origname
+  <name>` names the checkout directory instead: the created file gets
+  BOTH `Name: <name>` AND `Origname: <name>` — the workdir is always
+  named by `Name:`, so the checkout directory becomes `<pdir>/<name>`
+  while the `.projeny` file stays `<f.projeny>` — and `<name>` must
+  match the archive's top directory (the create refuses before anything
+  is written otherwise). `--comment <text>` stores `<text>` as the
+  file's free-text prose, indented like every tool-written `.projeny`
+  file's comments; repeating the option keeps only the last text.
+
+  When `<f.projeny>` already exists, `--force` decides what happens to
+  the project it still names (the erase-setup semantics;
+  `--erase-snapshots` passes through to every erase): with no `--force`
+  the create refuses and nothing is touched; with one `--force` the
+  existing project's setup state is erased, but only after the no-force
+  check passes — a checkout with uncommitted changes or unresolved
+  conflicts refuses with erase-setup's own wording (and so does a
+  project whose state cannot be assessed); with `--force` twice the
+  erase is unconditional and uncommitted work is discarded.
+
+  A checkout directory named by `--origname` gets one more guard: a
+  pre-existing `<pdir>/<name>` is refused without `--force`; at
+  `--force` or above it is erased (at the same force level) only when it
+  is attributable, and the file being replaced is considered first —
+  when `<f.projeny>` itself parses and carries `Name: <name>`, the
+  directory is its checkout and its own erase removes it, so a
+  `--force` re-run of the same create works. Otherwise its sibling
+  `<pdir>/<name>.projeny` must exist, parse cleanly, and carry
+  `Name: <name>`, which is what makes the directory that project's
+  checkout. A directory that cannot be attributed that way is NEVER
+  removed, no matter how many `--force` flags are given (erase-setup
+  `--force` also only erases named projects): the create refuses
+  instead, naming the sibling it checked. An eviction never deletes the
+  evicted project's `.projeny` file (projeny never deletes `.projeny`
+  files), so the leftover file still carries `Name: <name>` and keeps
+  claiming a checkout directory that now belongs to the new file: the
+  create prints a warning naming the leftover and the fix, and the file
+  should be removed or renamed if it is no longer wanted. Without
+  `--origname`, a pre-existing directory named by `Name:` is left to
+  setup's own adopt-or-refuse rule.
 
 - `diff <f.projeny|dir>`: prints the checkout's uncommitted change to stdout —
   the diff of the workdir against what a *fresh* `setup` of the current
@@ -475,10 +589,13 @@ hash matches); skipping the download` — once per run, no matter how many
 times the same archive is materialized, while the read-only reconstruction
 paths (`status`, `diff`, `get-attributes`, `freeze-mtime`) stay silent
 about a matching snapshot unless they actually have to download. Moving the
-project to a new tarball is done by editing the URL: header(s) to the new
-URL and hash (compute it with `projeny hash <file>`) and running `setup`,
-which re-downloads and merges local changes onto the new base; `rebase`
-refuses URL:-based projects.
+project to a new tarball is done by `rebase` with URL arguments
+(`projeny rebase <f.projeny|dir> <url> [<blake3-hash>] ...` downloads and
+verifies every listed URL, rewrites the URL: headers, and merges local
+changes onto the new base); editing the URL: header(s) by hand (compute the
+hash with `projeny hash <file>`) and running `setup` works too. A tarball
+path argument, on the other hand, is refused for a URL:-based project: it
+has no checked-in tarball to rebase onto.
 
 ## Parallel setup, package, extract, and download
 
@@ -717,7 +834,13 @@ checkout had never been set up (`setup` does a fresh setup; mutating
 commands like `commit`/`add`/`rm`/`mv`/`resolve` still hard-error, since
 there is nothing left to work on). This covers both naming forms: when the
 dotted and undotted versions of a file both exist, each is staled under its
-own name, so nothing survives under an original name. The one exception is
+own name, so nothing survives under an original name. One snapshot is
+never stale state: a URL:-based project's snapshot whose blake3 hash one
+of the current `.projeny` file's own `URL:` headers verifies IS the
+archive the file records (the bytes a `create` just fetched, say), so a
+fresh `setup` keeps it and skips the download — the single-project mirror
+of the parallel batch's rule that a plan-verified shared download must
+survive. The one exception is
 enforced for every command: nothing is disregarded while a setup journal
 (`f.projeny.setup-journal`) exists. The journal marks an interrupted
 conflicted setup whose recovery still needs the status file (conflict-side
@@ -888,7 +1011,25 @@ via the snapshot), the workdir-present-but-no-status adopt-or-refuse rule
 (setup unpacks into an existing directory that holds nothing it would
 overwrite, keeping the foreign files; it refuses with the offending paths
 listed otherwise), and snapshot copy-on-fallback from the tarball (by
-`setup` and `status`). It prints
+`setup` and `status`). The `create` sections cover the new project
+command: tarball and URL (with and without a hash — the computed hash
+equals `projeny hash`) forms, the copied-in tarball and the verified
+snapshot, `--comment` (last occurrence wins), the existing-file rule
+(refuse / `--force` with the no-force check / `--force --force`
+unconditional / `--erase-snapshots` passthrough), `--origname` naming the
+checkout directory (`Name:` AND `Origname:` become `<name>`; a mismatch
+with the archive's top dir refuses before anything is written), the
+`--origname` corner guard (a pre-existing checkout directory is erased
+only when attributable — the replaced file itself counts first, so a
+`--force` re-run of the same create works — and never removed
+otherwise, even with two `--force` flags), the warning about the
+evicted sibling's leftover `.projeny` file (it still claims the
+checkout name; the file is never deleted), the stale-state pin that
+keeps a URL project's hash-verified snapshot alive across an
+erase-setup without `--erase-snapshots` (the next setup re-uses it and
+downloads nothing), and the checkout-directory
+validation in project-argument resolution (mismatch refuses, match works,
+git-conflicted siblings still recover via `setup`). It prints
 `ok`/`FAIL` lines with a `passed/failed` summary and exits nonzero on
 any failure. A conflicting `setup` exits 1 (with markers left behind),
 so the suite asserts `expect_fail` for every conflict-leaving setup.

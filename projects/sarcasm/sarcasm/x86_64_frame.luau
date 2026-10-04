@@ -1978,6 +1978,27 @@ function x86_64_frame.analyzeFrame(body, sigDesc, regions)
 						end
 					end
 				end
+				-- Buffer-interior leas the carrier block below never sees (a
+				-- frame-interior lea AT the prologue depth D0 whose uses the leaD0
+				-- memory-only scan rejects -- the aesni-mb dec8x
+				-- `leaq 192+128(%rsp), %base` + `xorq $0x80, %base` toggle) still
+				-- define a COMPUTED buffer-address web when their uses are not all
+				-- memory-only: the buffer scan's (a0) pass lowers them as value
+				-- leas anyway, so record the computed fall-out here too. Without
+				-- it the group's absolute-alignment identity (and the output
+				-- frame's dynamic alignment it requires) is silently dropped and
+				-- the computed base miscompiles.
+				-- (c) Scope: the flag is set ONLY when the lea's uses are not
+				-- all memory-only -- the `xorq $0x80, %base` ALU toggle is what
+				-- trips it. The xor itself is never treated as a memory use and
+				-- gains no slot; it merely classifies the lea's web as computed.
+				-- Pure-memory leas skip this entirely (leaSaveUsesMemoryOnly) and
+				-- keep the carrier treatment below byte-for-byte, so unrelated
+				-- buffer leas are unaffected.
+				if inBufProbe and not isLeaSave and not bufRepRegs[ops[1].num]
+					and not leaSaveUsesMemoryOnly(st, idx, d - k) then
+					st.x86StackBufLeaValueComputed = true
+				end
 				if (pk == d or pk <= 0 or leaAny or leaD0) and not regionOf(rkey, false) then
 					if inBufProbe and not bufRepRegs[ops[1].num]
 						and not leaSaveUsesMemoryOnly(st, idx, d - k) then
@@ -3976,6 +3997,54 @@ function x86_64_frame.analyzeFrame(body, sigDesc, regions)
 				end
 			end
 		end
+		-- Prologue-prefix ands govern the abs-identity dataflow too. The
+		-- prologue scan swallows the whole frame setup (including its
+		-- `and $-N`), so the midAnd scan never marks it and the walk above
+		-- leaves every downstream state at "none" (or empty when no
+		-- mid-function and exists at all) -- yet every path through the body
+		-- flows through it (the prefix is straight-line from entry). Seed
+		-- non-clone "none"/unreached states after each prologue and with its
+		-- depth. Only "none"/nil is filled, never a midAnd depth or "dyn"
+		-- (a later and or an rsp restore from the walk above wins); clone
+		-- statements keep their jump-edge values (their own and story, if
+		-- any). Unreached non-decl statements are harmless (unreachable
+		-- declarations already errored in resolution, and no other consumer
+		-- reads andDomOf for non-clones except the identity).
+		-- (a) Scope/soundness for mid-function realignment and N mismatch:
+		-- writes touch non-clone slots ONLY (clones keep their jump-edge
+		-- values), and the only consumer reading non-clone slots is the
+		-- abs-identity below (gated on hasComputed groups); the B2-clone
+		-- keying consumer reads clone slots, which this loop never writes
+		-- -- so mid-function and clone keying are untouched. N mismatch is
+		-- structurally safe: the identity looks N up by the recorded depth
+		-- (andNByDepth), so a prologue-dominated decl uses the prologue N
+		-- while a midAnd-dominated decl keeps the mid depth from the walk
+		-- above (never "none", never overwritten here). A midAnd inside
+		-- a branch that the walk joins to "none" still flows through the
+		-- straight-line prefix, so the prologue depth governs on every path
+		-- (conservative: valid everywhere, claims nothing path-specific).
+		-- Same-depth/different-N ambiguity fails closed to no identity in
+		-- andNByDepth.
+		do
+			local cur = nil
+			for i, st in body do
+				if st.kind == "insn" and not st.b2clone and not st.localClone then
+					if cur ~= nil and (andDomOf[i] == "none" or andDomOf[i] == nil) then
+						andDomOf[i] = cur
+					end
+					if st.x86_prologue then
+						local b0 = x86.baseMnemonic(string.lower(st.mnemonic))
+						local o0 = st.operands
+						if b0 == "and" and o0 and o0[1] and o0[1].rc == "sp"
+							and o0[2] and o0[2].kind == "imm"
+							and type(depthIn[i]) == "number"
+							and isStackAlign(-immVal(o0[2])) then
+							cur = depthIn[i]
+						end
+					end
+				end
+			end
+		end
 	end
 	-- Did the park site at body index `saveIdx` execute after the frame's
 	-- alignment `and` (so the parked value carries the and's dynamic slack
@@ -5619,7 +5688,27 @@ function x86_64_frame.analyzeFrame(body, sigDesc, regions)
 			-- make the residue ambiguous — no identity.
 			local andNByDepth = {}
 			for i, st in body do
-				if st.kind == "insn" and st.x86_midAnd then
+				-- Prologue-prefix ands govern too (the prologue scan swallows
+				-- the whole frame setup, so the midAnd scan never marks them,
+				-- yet every path flows through them -- see the andDomOf seeding
+				-- below). Same N-by-depth table, same ambiguity rule.
+			-- Narrowing: contributes an entry only for a genuine prologue
+			-- `and $-N, %rsp` (sp register, stack-align N); anything else
+			-- leaves the table exactly as before. A prologue/mid N conflict
+			-- at one depth trips the same ambiguity rule as two midAnds (no
+			-- identity -- fails closed).
+				local isProAnd = false
+				if st.kind == "insn" and st.x86_prologue then
+					local b0 = x86.baseMnemonic(string.lower(st.mnemonic))
+					local o0 = st.operands
+					if b0 == "and" and o0 and o0[1] and o0[1].rc == "sp"
+						and o0[2] and o0[2].kind == "imm"
+						and type(depthIn[i]) == "number"
+						and isStackAlign(-immVal(o0[2])) then
+						isProAnd = true
+					end
+				end
+				if st.kind == "insn" and (st.x86_midAnd or isProAnd) then
 					local dd = depthIn[i]
 					if type(dd) == "number" and st.operands and st.operands[2]
 						and st.operands[2].kind == "imm" then
@@ -6124,7 +6213,23 @@ function x86_64_frame.analyzeFrame(body, sigDesc, regions)
 	-- the prologue's save would land on the first cluster's bytes.
 	if not needAlignSave and sbGroups then
 		for _, g in sbGroups do
-			if g.areq > 16 then needAlignSave = true break end
+			-- Groups carrying an absolute-alignment identity (the xor-toggle
+			-- feature) raise the effective alignment through g.abs.mod, not
+			-- areq, so they need the reservation too -- otherwise the
+			-- prologue's pre-alignment-rsp save lands inside the buffer
+			-- region itself (the aesni-mb dec8x shape: no wide cluster, a
+			-- 256-modulus identity, save slot colliding with buffer bytes).
+			-- (b) Scope: gated on a group carrying abs.mod > 16 (the xor-toggle
+			-- feature's absolute-alignment identity); groups without abs --
+			-- every pre-existing shape -- and functions without such a group
+			-- never take this branch and keep byte-identical layouts (the
+			-- areq > 16 disjunct predates this change). When it fires, the
+			-- 8-byte reservation shifts every cluster/group uniformly with
+			-- residues recomputed per cluster below, so all alignment
+			-- guarantees are preserved.
+			if g.areq > 16 or (g.abs and g.abs.mod and g.abs.mod > 16) then
+				needAlignSave = true break
+			end
 		end
 	end
 	local cursor = base0 + (needAlignSave and 8 or 0)

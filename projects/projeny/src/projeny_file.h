@@ -85,6 +85,20 @@ struct ProjenyFile {
 // file's embedded .projeny copy.
 std::string archive_name_from_url(const std::string& url);
 
+// Rewrite the archive-location headers of `head` (the header block — only
+// header lines, since parsing stops at the first blank line; scanning here
+// also stops at the first empty line, so only a mis-scoped `head` could ever
+// reach one) for a URL:-based form: every `Archive:` and `URL:` line is
+// removed, and one `URL: <url> <hash>` line per entry is inserted where the
+// FIRST removed line stood (at the top of the head when none were removed).
+// `replace_header_value`
+// cannot do this job: it rewrites every occurrence of a key in place, so it
+// could never collapse an Archive: line plus N URL: lines into exactly N new
+// URL: lines. The hashes are written as given — callers pass the lowercase
+// form a `URL:` header wants.
+std::string replace_archive_url_headers(const std::string& head,
+                                        const std::vector<ProjenyUrl>& urls);
+
 // Git conflict-marker helpers for .projeny files.
 //
 // A marker line is one of <<<<<<< / ||||||| / ======= / >>>>>>> at column 0,

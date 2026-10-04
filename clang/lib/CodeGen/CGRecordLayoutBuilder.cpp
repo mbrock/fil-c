@@ -317,6 +317,7 @@ void CGRecordLowering::lowerUnion(bool isNonVirtualBaseType) {
       isNonVirtualBaseType ? Layout.getDataSize() : Layout.getSize();
   llvm::Type *StorageType = nullptr;
   bool SeenNamedMember = false;
+  bool HasPointers = false;
   // Iterate through the fields setting bitFieldInfo and the Fields array. Also
   // locate the "most appropriate" storage type.  The heuristic for finding the
   // storage type isn't necessary, the first (non-0-length-bitfield) field's
@@ -333,6 +334,9 @@ void CGRecordLowering::lowerUnion(bool isNonVirtualBaseType) {
     }
     Fields[Field->getCanonicalDecl()] = 0;
     llvm::Type *FieldType = getStorageType(Field);
+    // Scan every alternative before the nonzero-null case skips the storage
+    // heuristic. Nested unions already expose their pointer words here.
+    HasPointers |= CodeGenTypes::hasPointerRepresentation(FieldType);
     // Compute zero-initializable status.
     // This union might not be zero initialized: it may contain a pointer to
     // data member which might have some exotic initialization sequence.
@@ -364,7 +368,7 @@ void CGRecordLowering::lowerUnion(bool isNonVirtualBaseType) {
   // Make all pointer alternatives visible to aggregate copies and the ABI,
   // including pointers hidden by the ordinary storage-field heuristic. Keep
   // the AST byte layout exact: packed unions may have a partial final word.
-  if (Types.hasPointerRepresentation(Context.getRecordType(D))) {
+  if (HasPointers) {
     // Synthetic pointer words must agree with every alternative's pointer
     // alignment. In particular, an aligned outer union does not repair a
     // packed member with a pointer at byte 1. Reject rather than introducing
@@ -1134,6 +1138,9 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
       // on both of them with the same index.
       assert(Builder.Packed == BaseBuilder.Packed &&
              "Non-virtual and complete types must agree on packedness");
+      assert(
+          Builder.HasPointerWordStorage == BaseBuilder.HasPointerWordStorage &&
+          "Non-virtual and complete types must agree on pointer-word storage");
     }
   }
 
@@ -1263,6 +1270,7 @@ void CGRecordLayout::print(raw_ostream &OS) const {
   if (BaseSubobjectType)
     OS << "  NonVirtualBaseLLVMType:" << *BaseSubobjectType << "\n";
   OS << "  IsZeroInitializable:" << IsZeroInitializable << "\n";
+  OS << "  HasPointerWordStorage:" << HasPointerWordStorage << "\n";
   OS << "  BitFields:[\n";
 
   // Print bit-field infos in declaration order.

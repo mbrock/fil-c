@@ -33,6 +33,7 @@
 #include "blake3/blake3.h"
 #include <curl/curl.h>
 
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -702,6 +703,46 @@ bool try_download(const std::string& url, std::string* data, std::string* err)
     }
     *data = body;
     return true;
+}
+
+bool arg_is_url(const std::string& s)
+{
+    // Decide by asking curl: the URL API is the same parser try_download
+    // feeds the string to, so "is a URL" means exactly "curl will parse
+    // (and therefore transfer) this". With the default flags, a string
+    // without a parsable scheme — every plain filename spelling, including
+    // "./x.tar.gz" and "12345" — is refused, and schemes libcurl cannot
+    // transfer are refused too. cleanup first either way: the helper must
+    // not leak on the not-a-URL path.
+    CURLU* h = curl_url();
+    if (!h)
+        return false; // out of memory: treat as a local path (caller dies
+                      // on a missing file, so nothing is silently wrong)
+    CURLUcode rc = curl_url_set(h, CURLUPART_URL, s.c_str(), 0);
+    bool is_url = rc == CURLUE_OK;
+    if (is_url) {
+        // Some curl builds accept any "word:rest" spelling ("foo:bar"
+        // parses with scheme FOO): require a scheme projeny can actually
+        // download through. curl normalizes the scheme's spelling, and the
+        // casing it reports has changed across versions, so compare
+        // case-insensitively.
+        char* scheme = NULL;
+        if (curl_url_get(h, CURLUPART_SCHEME, &scheme, 0) != CURLUE_OK ||
+            !scheme) {
+            curl_url_cleanup(h);
+            return false;
+        }
+        std::string lower;
+        for (const char* p = scheme; *p; ++p)
+            lower.push_back(
+                (char)tolower((unsigned char)*p));
+        curl_free(scheme);
+        if (lower != "http" && lower != "https" && lower != "ftp" &&
+            lower != "ftps" && lower != "file")
+            is_url = false;
+    }
+    curl_url_cleanup(h);
+    return is_url;
 }
 
 std::vector<BatchPackageResult> download_batch(

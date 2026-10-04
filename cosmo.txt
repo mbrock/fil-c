@@ -22,13 +22,25 @@ on a Linux/X86_64 host (the cosmo APE tooling installed into
 flavor is exercised on).  For the aarch64 half of the story you also want:
 
 ```
-sudo apt-get install gcc-aarch64-linux-gnu qemu-user unzip
+sudo apt-get install gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+    linux-libc-dev-arm64-cross libstdc++-13-dev-arm64-cross \
+    qemu-user unzip
 ```
 
-`gcc-aarch64-linux-gnu` provides `aarch64-linux-gnu-ld` and
-`/usr/aarch64-linux-gnu/include` (kernel headers for the aarch64 target),
-`qemu-user` provides `qemu-aarch64` for running aarch64 binaries on an x86_64
-host, and `unzip` is needed by cosmo's build on first use.
+`gcc-aarch64-linux-gnu` provides `aarch64-linux-gnu-ld` (plus the aarch64
+cross compiler and its runtime), `libc6-dev-arm64-cross` and
+`linux-libc-dev-arm64-cross` provide the aarch64 glibc and kernel headers
+that the cross compiler-rt and libpas builds compile against,
+`libstdc++-13-dev-arm64-cross` provides the aarch64 C++ standard library
+headers used by the C++ parts of the cross compiler-rt build (on a distro
+whose cross gcc is GCC 12, like Ubuntu 22.04, install
+`libstdc++-12-dev-arm64-cross` instead), `qemu-user` provides `qemu-aarch64`
+for running aarch64 binaries on an x86_64 host, and `unzip` is needed by
+cosmo's build on first use.
+
+This is exactly what the dev container created by `./enter_container.sh`
+installs; the package set was verified on Ubuntu 24.04, where
+`./build_all_fast_cosmo.sh` builds and passes the full test suite.
 
 ## TL;DR
 
@@ -107,7 +119,9 @@ plugged into the two alt slots.  The compiler build steps
   - `pizfix/yolo-include/` (cosmo headers used to compile libpas).
   - For every non-host arch: cross compiler-rt builtins
     (`pizfix/lib-aarch64/libyolort.a`, `crtbegin.o`, `crtend.o`, from
-    `compiler-rt/build-aarch64`), the cross unwinder
+    `compiler-rt/build-aarch64`; only builtins and crt are consumed, so the
+    cmake config turns off sanitizers, xray, memprof, ctx-profile, libfuzzer,
+    and profile), the cross unwinder
     (`pizfix/lib-aarch64/libyolounwind.a`), and the cross libpas runtime
     (`pizfix/lib-aarch64/libpizlo.a`, `filc_crt.o`, `filc_mincrt.o`, built
     with `make -C libpas FILCARCH=aarch64`).
@@ -139,8 +153,11 @@ automatic.
   toolchain into `projects/yolocosmo/.cosmocc` (~1.2GB).  This needs network
   access and `unzip`.  After that it is cached and the cosmo yolo build itself
   is quick (seconds per arch when objects are up to date).
-- The aarch64 pieces need the cross toolchain installed
-  (`gcc-aarch64-linux-gnu`); `build_yolocosmo.sh` symlinks
+- The aarch64 pieces need the cross toolchain and headers installed
+  (`gcc-aarch64-linux-gnu`, `libc6-dev-arm64-cross`,
+  `linux-libc-dev-arm64-cross`, and the matching
+  `libstdc++-13-dev-arm64-cross` — see the package list at the top);
+  `build_yolocosmo.sh` symlinks
   `/usr/aarch64-linux-gnu/include/{linux,asm,asm-generic}` into
   `pizfix/os-include-aarch64/`, and the aarch64 cosmo link wants
   `aarch64-linux-gnu-ld` (the driver falls back to `ld.lld` if it is missing).

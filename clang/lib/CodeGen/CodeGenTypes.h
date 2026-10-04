@@ -301,9 +301,7 @@ public:  // These are internal details of CGT that shouldn't be used externally.
   /// zero-initialized (in the C++ sense) with an LLVM zeroinitializer.
   bool isZeroInitializable(QualType T);
 
-  /// Whether a value can contain a capability, including union alternatives
-  /// not represented by its selected LLVM storage type.
-  bool hasPointerRepresentation(QualType T);
+  /// Whether the recursively lowered storage type contains a pointer leaf.
   static bool hasPointerRepresentation(llvm::Type *T);
 
   /// Whether any pointer leaf may be unaligned, including nested offsets and

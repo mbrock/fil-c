@@ -79,10 +79,14 @@ norm() {
         VPCMPLTUW|VPCMPNEQUW|VPCMPLEUW|VPCMPGTUW|VPCMPGEUW|VPCMPEQUW) echo VPCMPUW; return ;;
         VPCMPLTUD|VPCMPNEQUD|VPCMPLEUD|VPCMPGTUD|VPCMPGEUD|VPCMPEQUD) echo VPCMPUD; return ;;
         VPCMPLTUQ|VPCMPNEQUQ|VPCMPLEUQ|VPCMPGTUQ|VPCMPGEUQ|VPCMPEQUQ) echo VPCMPUQ; return ;;
-        VPCMPLTB|VPCMPLEB|VPCMPGTB|VPCMPGEB) echo VPCMPB; return ;;
+        VPCMPLTB|VPCMPLEB|VPCMPGTB|VPCMPGEB|VPCMPNLEB) echo VPCMPB; return ;;
         VPCMPLTW|VPCMPLEW|VPCMPGTW|VPCMPGEW) echo VPCMPW; return ;;
         VPCMPLTD|VPCMPLED|VPCMPGTD|VPCMPGED) echo VPCMPD; return ;;
         VPCMPLTQ|VPCMPLEQ|VPCMPGTQ|VPCMPGEQ) echo VPCMPQ; return ;;
+        # objdump spells VPCLMULQDQ with the operand selection baked into
+        # the mnemonic: vpclmullqlqdq/vpclmulhqlqdq/vpclmullqhqdq/
+        # vpclmulhqhqdq (imm8 0x00/0x01/0x10/0x11).
+        VPCLMULLQLQDQ|VPCLMULHQLQDQ|VPCLMULLQHQDQ|VPCLMULHQHQDQ) echo VPCLMULQDQ; return ;;
         ADDR32) echo ADDR32; return ;;
         MOVSLQ|MOVSL) echo MOVSXD; return ;;
         MOVZB|MOVZBL|MOVZBW|MOVZW|MOVZWL) echo MOVZX; return ;;
@@ -135,6 +139,30 @@ if [ ${#BINS[@]} -eq 0 ]; then
     for s in /lib/x86_64-linux-gnu/libc.so.6 /lib64/ld-linux-x86-64.so.2; do
         [ -f "$s" ] && BINS+=("$s")
     done
+fi
+
+# Regression guard: always scan a tiny object with VPCLMULQDQ using all
+# four imm8 operand selectors (0x00/0x01/0x10/0x11). objdump spells each
+# with a different alias mnemonic, so a missed alias in norm() shows up
+# as MISSING here instead of only biting when some binary happens to use
+# that immediate.
+if command -v gcc >/dev/null 2>&1 \
+   && gcc -O2 -mavx -mvpclmulqdq -mpclmul -c -o /dev/null -x c /dev/null 2>/dev/null; then
+    mkdir -p test-output
+    cat > test-output/vpclmul_aliases.c <<'EOF'
+#include <wmmintrin.h>
+__m128i f00(__m128i a, __m128i b) { return _mm_clmulepi64_si128(a, b, 0x00); }
+__m128i f01(__m128i a, __m128i b) { return _mm_clmulepi64_si128(a, b, 0x01); }
+__m128i f10(__m128i a, __m128i b) { return _mm_clmulepi64_si128(a, b, 0x10); }
+__m128i f11(__m128i a, __m128i b) { return _mm_clmulepi64_si128(a, b, 0x11); }
+EOF
+    # -mavx -mpclmul is required on GCC 12: -mvpclmulqdq alone does not
+    # define __PCLMUL__, and -mavx is what makes gcc emit the VEX-encoded
+    # (vp-prefixed) forms that this guard is about.
+    if gcc -O2 -mavx -mvpclmulqdq -mpclmul -c -o test-output/vpclmul_aliases.o \
+           test-output/vpclmul_aliases.c 2>/dev/null; then
+        BINS+=(test-output/vpclmul_aliases.o)
+    fi
 fi
 
 # shellcheck disable=SC2068

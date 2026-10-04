@@ -1,6 +1,7 @@
 // The first member's null representation must survive pointer-word storage.
 // In the Itanium ABI a null data-member pointer is -1, not all-zero bytes.
 #include <cassert>
+#include <cstring>
 
 struct Owner { int value; };
 using Member = int Owner::*;
@@ -30,6 +31,38 @@ struct Base { Member inherited; };
 struct WithBase : Base { Member own; };
 union RecordChoice { WithBase members; void* pointer; };
 RecordChoice staticRecord;
+
+// A typed zero aggregate has implicit LLVM padding. It must not replace the
+// explicit zero bytes of the containing null initializer. The union also has
+// a full extra word beyond the selected member, which must be zero, not undef.
+struct PaddedZero { unsigned char byte; unsigned int word; };
+struct NullPayload { PaddedZero zero; Member member; };
+union PaddedChoice { NullPayload payload; void* pointers[3]; };
+static_assert(sizeof(PaddedZero) == 8 && sizeof(NullPayload) == 16);
+static_assert(sizeof(PaddedChoice) == 24);
+PaddedChoice staticPadded[2];
+
+static void checkPadding(const PaddedChoice& value)
+{
+    assert(value.payload.member == nullptr);
+    unsigned char bytes[sizeof(value)];
+    std::memcpy(bytes, &value, sizeof(bytes));
+    for (unsigned i = 0; i < sizeof(bytes); ++i)
+        assert(bytes[i] == (i >= 8 && i < 16 ? 0xff : 0));
+}
+
+// The base's complete size includes seven tail bytes; its base-subobject
+// extent ends sooner so the derived field can reuse that padding. Mixed member
+// access makes it non-POD for layout without a user-provided constructor.
+struct TailBase {
+    Member member;
+private:
+    unsigned char byte;
+public:
+    unsigned char getByte() const { return byte; }
+};
+struct TailDerived : TailBase { unsigned char sentinel; };
+static_assert(sizeof(TailBase) == 16 && sizeof(TailDerived) == 16);
 
 // A lifetime-extended temporary is allocated before its null initializer is
 // emitted. Differently typed initializers must keep its size and access type.
@@ -71,6 +104,17 @@ int main()
     assert(staticRecord.members.inherited == nullptr &&
            staticRecord.members.own == nullptr);
     assert(temporary.member == nullptr);
+
+    checkPadding(staticPadded[0]);
+    checkPadding(staticPadded[1]);
+    auto* heapPadded = new PaddedChoice();
+    checkPadding(*heapPadded);
+    delete heapPadded;
+    auto* derived = new TailDerived();
+    assert(derived->member == nullptr && derived->getByte() == 0 && derived->sentinel == 0);
+    derived->sentinel = 0x67;
+    assert(derived->member == nullptr && derived->getByte() == 0 && derived->sentinel == 0x67);
+    delete derived;
 
     Choice initialized{nullptr};
     assert(initialized.member == nullptr);

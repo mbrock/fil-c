@@ -1962,20 +1962,49 @@ void exec_syscall(CPU* cpu, const Dec& d) {
     emulate_syscall(cpu, d.insn.length);
 }
 
+// zegarmistrz presence (see cpuid.txt): guests detect us via the CPUID
+// hypervisor convention — CPUID.1:ECX bit 31 ("hypervisor present", which
+// real silicon reserves as zero) plus the software-reserved hypervisor leaf
+// range 0x40000000-0x4000FFFF, where leaf 0x40000000 reports the max
+// hypervisor leaf in EAX and the 12-byte vendor signature "Zegarmistrz\0"
+// in EBX:ECX:EDX. Our leaves shadow the host's, so guests never see the
+// host hypervisor's signature through us; undefined leaves in the range
+// read as zero.
+static const unsigned kZegHypLeafBase = 0x40000000;
+static const unsigned kZegHypLeafEnd = 0x40010000;
+static const unsigned kZegSigEbx = 0x6167655Au; // "Zega"
+static const unsigned kZegSigEcx = 0x73696D72u; // "rmis"
+static const unsigned kZegSigEdx = 0x007A7274u; // "trz\0"
+
 void exec_cpuid(CPU* cpu, const Dec& d) {
     unsigned leaf = (unsigned)cpu->gpr[ZG_RAX].val;
     unsigned sub = (unsigned)cpu->gpr[ZG_RCX].val;
     unsigned a = 0, b = 0, c = 0, e = 0;
-    __cpuid_count(leaf, sub, a, b, c, e);
-    // Phase 2 implements EVEX/AVX512 + AES/SHA/VAES/VPCLMUL/GFNI/FMA/F16C, so
-    // report host features truthfully. Still hide AMX (tile) state, CET, and
-    // UINTR, which the interpreter does not model (clean errors if used).
-    if (leaf == 7 && sub == 0) {
-        b &= ~((1u << 24) | (1u << 25)); // AMX-BF16, AMX-TILE
-        e &= ~((1u << 3) | (1u << 4) | (1u << 5)); // AMX-INT8, AVX-VNNI-INT8, AMX-FP16
-    }
-    if (leaf == 7 && sub == 1) {
-        a &= ~((1u << 3) | (1u << 4) | (1u << 5) | (1u << 21) | (1u << 22)); // AMX-FP16, HRESET, UINTR, CET...
+    if (leaf >= kZegHypLeafBase && leaf < kZegHypLeafEnd) {
+        // Our own hypervisor leaves: never pass through to the host, so the
+        // host hypervisor's leaves (and signature) never leak. Leaf
+        // 0x40000000 is the vendor leaf; every other leaf in the range is
+        // undefined and reads as zero.
+        if (leaf == kZegHypLeafBase) {
+            a = kZegHypLeafBase; // max hypervisor leaf == the vendor leaf
+            b = kZegSigEbx;
+            c = kZegSigEcx;
+            e = kZegSigEdx;
+        }
+    } else {
+        __cpuid_count(leaf, sub, a, b, c, e);
+        // Phase 2 implements EVEX/AVX512 + AES/SHA/VAES/VPCLMUL/GFNI/FMA/F16C, so
+        // report host features truthfully. Still hide AMX (tile) state, CET, and
+        // UINTR, which the interpreter does not model (clean errors if used).
+        if (leaf == 7 && sub == 0) {
+            b &= ~((1u << 24) | (1u << 25)); // AMX-BF16, AMX-TILE
+            e &= ~((1u << 3) | (1u << 4) | (1u << 5)); // AMX-INT8, AVX-VNNI-INT8, AMX-FP16
+        }
+        if (leaf == 7 && sub == 1) {
+            a &= ~((1u << 3) | (1u << 4) | (1u << 5) | (1u << 21) | (1u << 22)); // AMX-FP16, HRESET, UINTR, CET...
+        }
+        if (leaf == 1)
+            c |= 1u << 31; // hypervisor present (cpuid.txt: guests check this first)
     }
     cpu->gpr[ZG_RAX].val = a;
     cpu->gpr[ZG_RBX].val = b;

@@ -500,8 +500,8 @@ CC='/opt/fil/bin/filcc -yolo-assembler' CXX=/opt/fil/bin/fil++ ./config --prefix
 make -j `nproc`
 sed -i '/INSTALL_LIBS/s/libcrypto.a libssl.a//' Makefile
 make -j `nproc` MANSUFFIX=ssl install
-mv -v /opt/fil/share/doc/openssl /opt/fil/share/doc/openssl-3.6.4
-cp -vfr doc/* /opt/fil/share/doc/openssl-3.6.4
+mv -v /opt/fil/share/doc/openssl /opt/fil/share/doc/openssl-3.6.5
+cp -vfr doc/* /opt/fil/share/doc/openssl-3.6.5
 cd ..
 rm -rf pizlonated-openssl
 hash -r

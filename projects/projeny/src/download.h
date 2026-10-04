@@ -57,6 +57,19 @@ std::string blake3_file_hash_hex(const std::string& path);
 // progress callback already printed exactly that state).
 bool try_download(const std::string& url, std::string* data, std::string* err);
 
+// True when `s` is a URL rather than a local path — decided by ASKING CURL
+// (the same parser that will consume it in try_download): curl_url_set with
+// the default flags accepts exactly the strings libcurl can transfer, so a
+// plain filename ("fake-2.0.tar.gz", "./x.tar.gz") is refused while
+// "http://...", "https://...", "ftp://...", "ftps://...", and "file://..."
+// parse. On curl builds that also accept unknown "word:rest" spellings, the
+// parsed scheme must additionally be one projeny can download through
+// (HTTP/HTTPS/FTP/FTPS/FILE; the scheme is compared case-insensitively
+// because different curl versions normalize it differently). Used by
+// `rebase` to tell the legacy <new-tarball> argument from URL: header
+// arguments.
+bool arg_is_url(const std::string& s);
+
 // One package to download in a batch: `name` is the identity (the archive
 // basename; two callers wanting the same name share one download), `urls`
 // are candidate URLs in priority order (mirrors of the same archive), and

@@ -38,7 +38,14 @@
 #   pizfix/lib/crt1.o   the process entry object (yolo cosmo crt + yolo glue)
 #   pizfix/include/     cosmo public headers (the flavor switch for the
 #                       driver; only the host-arch build installs them since
-#                       cosmo's headers are arch-neutral)
+#                       cosmo's headers are arch-neutral).  Only the headers
+#                       of code that is actually part of this libc get
+#                       installed: the isystem public headers minus the
+#                       wrappers for cosmo's vendored C++-runtime/openmp/
+#                       libunwind trees (the Fil-C world uses LLVM
+#                       libc++/libc++abi and stdfil-include/unwind.h), plus
+#                       the internal header trees that the installed public
+#                       headers actually reach.  See section 7 below.
 #
 # This makefile is driven by build_usercosmo.sh, which runs:
 #
@@ -574,9 +581,37 @@ $(LIBDIR)/crt1.o: $(BUILD)/crt1.fused.o | check-env
 	cp -f $< $@
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. Install the cosmo public headers into pizfix/include (what cosmocc ships
-#    as include/: the isystem headers at the top level plus the internal
-#    header trees that cosmo headers cross-include).
+# 7. Install the cosmo public headers into pizfix/include.  pizfix/include
+#    gets only the headers of code that is actually part of this libc:
+#
+#    a. cosmo's isystem public headers, minus the wrappers whose only job is
+#       to forward to cosmo's vendored C++-runtime/openmp/libunwind trees
+#       (cxxabi.h, omp.h, omp-tools.h, ompx.h, unwind.h, experimental/, ext/,
+#       module.modulemap, libcxx.imp).  None of those vendored trees are
+#       built in the Fil-C world: C++ code uses the LLVM libc++/libc++abi
+#       that the driver searches ahead of pizfix/include (<cxxabi.h> resolves
+#       to build/include/c++/v1/cxxabi.h), and <unwind.h> resolves to Fil-C's
+#       own pizfix/stdfil-include/unwind.h for both C and C++.  <omp.h> would
+#       be declarations without a library anyway (the Fil-C usercosmo build
+#       never compiles third_party/openmp, so there is no libomp to link
+#       against), so shipping it is a link-time trap.  The five .h wrappers
+#       are excluded from the internal-tree copy below as well: the find
+#       over libc/ would otherwise reinstall them, dangling, at the nested
+#       pizfix/include/libc/isystem/ path (the extensionless experimental/
+#       and ext/ wrappers and module.modulemap/libcxx.imp need no such
+#       exclusion there, since they match neither *.h nor *.inc).
+#
+#    b. internal headers only for code that is actually compiled into this
+#       libc: libc/**, the third_party dirs that are archived into libc.a
+#       (gdtoa, getopt, musl, nsync, regex, sed, tr, tz), the header-only
+#       compiler intrinsic trees third_party/intel and third_party/aarch64
+#       (what <immintrin.h> and <arm_neon.h> resolve to), and the two
+#       internal trees that installed public headers cross-include
+#       (dsp/audio/cosmoaudio via <cosmoaudio.h> and net/http via <cosmo.h>).
+#       The rest of third_party (zlib, lua, python, mbedtls, sqlite3, ...)
+#       and ape/ and ctl/ are NOT installed: cosmo is *just* the libc in the
+#       Fil-C world; user libraries are built the Fil-C way, not vendored
+#       from cosmo's tree.
 #
 #    cosmo's isystem headers assume that normalize.inc was force-included
 #    first (cosmocc does `-include libc/integral/normalize.inc`), which is
@@ -591,8 +626,20 @@ install-headers: | check-env
 	rm -rf $(PIZFIX)/include
 	mkdir -p $(PIZFIX)/include
 	(cd $(COSMO)/libc/isystem && find . -type f) | LC_ALL=C sort > $(BUILD)/headers.txt
-	(cd $(COSMO)/libc/isystem && tar -cf - .) | (cd $(PIZFIX)/include && tar -xf -)
-	(cd $(COSMO) && find libc ape ctl third_party -name '*.h' -o -name '*.inc' | tar -cf - -T -) | (cd $(PIZFIX)/include && tar -xf -)
+	(cd $(COSMO)/libc/isystem && tar -c \
+	    --exclude=./cxxabi.h --exclude=./omp.h --exclude=./omp-tools.h \
+	    --exclude=./ompx.h --exclude=./unwind.h --exclude=./experimental \
+	    --exclude=./ext --exclude=./module.modulemap --exclude=./libcxx.imp \
+	    -f - .) | (cd $(PIZFIX)/include && tar -xf -)
+	(cd $(COSMO) && find libc dsp/audio/cosmoaudio net/http \
+	    third_party/aarch64 third_party/gdtoa third_party/getopt \
+	    third_party/intel third_party/musl third_party/nsync \
+	    third_party/regex third_party/sed third_party/tr third_party/tz \
+	    \( -name '*.h' -o -name '*.inc' \) \
+	    ! -path libc/isystem/cxxabi.h ! -path libc/isystem/omp.h \
+	    ! -path libc/isystem/omp-tools.h ! -path libc/isystem/ompx.h \
+	    ! -path libc/isystem/unwind.h \
+	    | tar -cf - -T -) | (cd $(PIZFIX)/include && tar -xf -)
 	cp -f $(COSMO)/libc/integral/*.inc $(PIZFIX)/include/ 2>/dev/null || true
 	while read -r h; do \
 	    h="$${h#./}"; \

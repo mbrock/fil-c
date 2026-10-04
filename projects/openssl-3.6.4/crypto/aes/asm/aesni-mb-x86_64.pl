@@ -232,10 +232,25 @@ $code.=<<___;
 	add	\$16,$offset
 ___
 if ($ENV{SARCASM}) {
-  # sink into a proper object, not below the frame
+  # Sink into a proper object, not below the frame. SARCASM-only mirror
+  # of the gas slide (lea 16(%rsp),$sink; sub $offset,$sink) against the
+  # global: THIS loop-head site sets $sink=base+16-$offset, so sunk enc4x
+  # loads ((@inptr,$offset)) sit constant at base+16 -- window
+  # [base+16,base+32) -- and sunk stores (-16(@outptr,$offset)) sit
+  # constant at base -- window [base,base+16) -- via the -16 store bias,
+  # for any $num. The two windows are disjoint, the same 16B separation
+  # the pristine +16(input)/+0(output) stack slots provide. The other
+  # sink sites use bare base and are audited at the .comm below: the
+  # prologue cancel (its bare value is only read at offset 0, then
+  # re-sunk here on iteration 1 since $one=1 > count=0 fires cmovge,
+  # before any ($offset) use) and the 8x per-stream re-sinks (bare base
+  # REQUIRED there -- their input loads carry a +16 bias, so a slid base
+  # would push them to base+32). Prefetches observing slid addresses are
+  # memory-neutral hints (no bounds check).
   $code.=<<___;
 	mov	\$1,$one			# constant of 1
-	leaq	aesni_mb_sink(%rip),$sink
+	leaq	aesni_mb_sink+16(%rip),$sink
+	sub	$offset,$sink
 ___
 } else {
   $code.=<<___;
@@ -534,10 +549,18 @@ $code.=<<___;
 	add	\$16,$offset
 ___
 if ($ENV{SARCASM}) {
-  # sink into a proper object, not below the frame
+  # Same slide as the enc4x loop head above ($sink=base+16-$offset):
+  # sunk dec4x loads ((@inptr,$offset)) sit constant at base+16 --
+  # [base+16,base+32) -- and sunk stores (-16(@outptr,$offset)) AND the
+  # next-IV reloads (-16(@inptr,$offset)) sit constant at base --
+  # [base,base+16). The slide is load-bearing for the IV reload: unslid
+  # it would read base-16. Bare-base sites (prologue cancel, 8x
+  # per-stream re-sinks) are audited at the .comm below; this loop-head
+  # site is the only slid one in dec4x.
   $code.=<<___;
 	mov	\$1,$one			# constant of 1
-	leaq	aesni_mb_sink(%rip),$sink
+	leaq	aesni_mb_sink+16(%rip),$sink
+	sub	$offset,$sink
 ___
 } else {
   $code.=<<___;
@@ -919,9 +942,8 @@ ___
     # All enc8x offload accesses sit in a B2-shared body, so every annotation
     # is the long form (a clone's buffer window is private to its own frame
     # context and cannot share a short form's file-wide range).
-    my $offe = " #! stack buffer (offe, %rsp + 128, %rsp + 192)";
     $code.=<<___ if ($i<4)
-	 vmovdqu	@inp[$i%4],`16*$i`($offload)$offe	# off-load
+	 vmovdqu	@inp[$i%4],`16*$i`($offload)	#! stack buffer (offe, %rsp + 128, %rsp + 192)	# off-load
 ___
   } else {
 $code.=<<___;
@@ -1279,6 +1301,10 @@ ___
 $code.=<<___;
 	 lea	192+128(%rsp),$offload		# offload area
 ___
+# Single shared emission for both paths: the offload-input stores carry the
+# offd-window annotation inline. It is a plain assembler comment (`#...`),
+# so gas ignores it and no Perl conditional is needed; a forked if/else copy
+# here would double ~25 lines differing only in that one column.
 $code.=<<___;
 
 	vmovdqu	(@ptr[0]),@out[0]		# load inputs
@@ -1464,6 +1490,11 @@ $code.=<<___;
 	 vmovdqa	$zero,32(%rsp)			# update counters
 	 vpxor		$zero,$zero,$zero
 	vaesdeclast	$rndkey0,@out[1],@out[1]
+___
+# Same inline-annotation column as the offload-input block above: the IV-xor
+# loads carry the offd-window annotation (a plain assembler comment, so gas
+# ignores it and no Perl conditional is needed).
+$code.=<<___;
 	vpxor		0x00($offload),@out[0],@out[0]	#! stack buffer (offd, %rsp + 192, %rsp + 448)	# xor with IV
 	vaesdeclast	$rndkey0,@out[2],@out[2]
 	vpxor		0x10($offload),@out[1],@out[1]	#! stack buffer (offd, %rsp + 192, %rsp + 448)
@@ -1545,43 +1576,47 @@ if ($ENV{SARCASM}) {
 	jnz	.Loop_dec8x
 ___
 } else {
+  # Gas-only branch: no `#! stack buffer` annotations here (gas would only
+  # see them as trailing comments, and the buffer declarations are a
+  # SARCASM-only concern). The same ($offload) accesses carry the (offd,
+  # %rsp+192..%rsp+448) annotation on the SARCASM path above.
   $code.=<<___;
 	vmovups		@out[0],-16(@ptr[0])		# write output
 	 sub		$offset,@ptr[0]			# switch to input
 	 vmovdqu	128+0(%rsp),@out[0]
-	vpxor		0x70($offload),@out[7],@out[7]	#! stack buffer (offd, %rsp + 192, %rsp + 448)
+	vpxor		0x70($offload),@out[7],@out[7]
 	vmovups		@out[1],-16(@ptr[1])
 	 sub		`64+1*8`(%rsp),@ptr[1]
-	 vmovdqu	@out[0],0x00($offload)	#! stack buffer (offd, %rsp + 192, %rsp + 448)
+	 vmovdqu	@out[0],0x00($offload)
 	 vpxor		$zero,@out[0],@out[0]
 	 vmovdqu	128+16(%rsp),@out[1]
 	vmovups		@out[2],-16(@ptr[2])
 	 sub		`64+2*8`(%rsp),@ptr[2]
-	 vmovdqu	@out[1],0x10($offload)	#! stack buffer (offd, %rsp + 192, %rsp + 448)
+	 vmovdqu	@out[1],0x10($offload)
 	 vpxor		$zero,@out[1],@out[1]
 	 vmovdqu	128+32(%rsp),@out[2]
 	vmovups		@out[3],-16(@ptr[3])
 	 sub		`64+3*8`(%rsp),@ptr[3]
-	 vmovdqu	@out[2],0x20($offload)	#! stack buffer (offd, %rsp + 192, %rsp + 448)
+	 vmovdqu	@out[2],0x20($offload)
 	 vpxor		$zero,@out[2],@out[2]
 	 vmovdqu	128+48(%rsp),@out[3]
 	vmovups		@out[4],-16(@ptr[4])
 	 sub		`64+4*8`(%rsp),@ptr[4]
-	 vmovdqu	@out[3],0x30($offload)	#! stack buffer (offd, %rsp + 192, %rsp + 448)
+	 vmovdqu	@out[3],0x30($offload)
 	 vpxor		$zero,@out[3],@out[3]
-	 vmovdqu	@inp[0],0x40($offload)	#! stack buffer (offd, %rsp + 192, %rsp + 448)
+	 vmovdqu	@inp[0],0x40($offload)
 	 vpxor		@inp[0],$zero,@out[4]
 	vmovups		@out[5],-16(@ptr[5])
 	 sub		`64+5*8`(%rsp),@ptr[5]
-	 vmovdqu	@inp[1],0x50($offload)	#! stack buffer (offd, %rsp + 192, %rsp + 448)
+	 vmovdqu	@inp[1],0x50($offload)
 	 vpxor		@inp[1],$zero,@out[5]
 	vmovups		@out[6],-16(@ptr[6])
 	 sub		`64+6*8`(%rsp),@ptr[6]
-	 vmovdqu	@inp[2],0x60($offload)	#! stack buffer (offd, %rsp + 192, %rsp + 448)
+	 vmovdqu	@inp[2],0x60($offload)
 	 vpxor		@inp[2],$zero,@out[6]
 	vmovups		@out[7],-16(@ptr[7])
 	 sub		`64+7*8`(%rsp),@ptr[7]
-	 vmovdqu	@inp[3],0x70($offload)	#! stack buffer (offd, %rsp + 192, %rsp + 448)
+	 vmovdqu	@inp[3],0x70($offload)
 	 vpxor		@inp[3],$zero,@out[7]
 
 	xor	\$128,$offload
@@ -1839,10 +1874,39 @@ sub aesni {
 }
 
 if ($ENV{SARCASM}) {
-  # Sink for cancelled descriptors (see the sink-register notes at the
-  # cmov sites).
+  # Single 32-byte sink object for cancelled input/output descriptors.
+  # Full site audit (base = &aesni_mb_sink; every window must fall in
+  # [base,base+32)):
+  # - enc4x/dec4x prologue cancels (leaq sink,$sink; cmovle %rbp): bare
+  #   base, read by the pre-loop movdqu (@inptr) at [base,base+16), then
+  #   re-sunk by the loop-head slide on iteration 1 ($one=1 > count=0
+  #   fires cmovge) before any ($offset) use;
+  # - enc4x/dec4x loop-head slides (leaq sink+16; sub $offset): sunk
+  #   loads (@inptr,$offset) constant at [base+16,base+32), sunk stores
+  #   -16(@outptr,$offset) and (dec4x) next-IV reloads
+  #   -16(@inptr,$offset) constant at [base,base+16), for any $num;
+  # - enc8x/dec8x prologue cancels (leaq sink,$tmp; cmovle): bare base,
+  #   read by the pre-loop vpxor/vmovdqu (@ptr) at [base,base+16); the
+  #   output slots keep real output capabilities, never the sink;
+  # - enc8x/dec8x per-stream re-sinks (leaq sink,@ptr[$i] and
+  #   leaq sink,$offset): bare base REQUIRED -- the input loads carry a
+  #   +16 bias (vpxor/vmovdqu 16(@ptr[$i])) landing at [base+16,base+32)
+  #   while the tail output stores (vmovups @out,($offset)) land at
+  #   [base,base+16); the post-access lea-16 advances park base+16 in
+  #   the register/slot, but every later iteration re-sinks first ($one
+  #   only grows past the exhausted count), so no checked access walks
+  #   off; prefetches observing parked values are memory-neutral hints.
+  # Union of all windows = [base,base+32): 32 bytes at 16-alignment
+  # suffice, and the load half and store half stay disjoint, so inputs
+  # and outputs can share the one object -- exactly like the pristine
+  # code shares its 48-byte frame area. The input/output last-block
+  # asymmetry (cmovge sinks one block early to cover the next-block
+  # load, cmovg sinks exactly at exhaustion for the store) is preserved:
+  # a dummy load never touches a live output, so the shared sink is
+  # safe. (4096 would only cover 256 blocks of a sliding form while
+  # wasting 128x what the constant/reset form needs.)
   $code.=<<___;
-	.comm	aesni_mb_sink,4096,16
+	.comm	aesni_mb_sink,32,16
 ___
 }
 $code =~ s/\`([^\`]*)\`/eval($1)/gem;

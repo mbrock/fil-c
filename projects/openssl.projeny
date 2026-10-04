@@ -1,5 +1,6 @@
-Archive: openssl-3.6.4.tar.gz
-Origname: openssl-3.6.4
+URL: https://github.com/openssl/openssl/releases/download/openssl-3.6.5/openssl-3.6.5.tar.gz 1f7fe0f6b2d9c46f70eee94d4e8700cf754623e9764af424e3eb9a9127d77999
+URL: https://www.openssl.org/source/openssl-3.6.5.tar.gz 1f7fe0f6b2d9c46f70eee94d4e8700cf754623e9764af424e3eb9a9127d77999
+Origname: openssl-3.6.5
 Name: openssl
 
     openssl with the Fil-C port (constant-time crypto and assembly-call changes; see https://fil-c.org/constant_time_crypto).
@@ -3380,10 +3381,10 @@ diff --git a/openssl/test/recipes/01-test_symbol_presence.t b/openssl/test/recip
 deleted file mode 100644
 --- a/openssl/test/recipes/01-test_symbol_presence.t
 +++ /dev/null
-@@ -1,244 +0,0 @@
+@@ -1,247 +0,0 @@
 -#! /usr/bin/env perl
 -# -*- mode: Perl -*-
--# Copyright 2016-2023 The OpenSSL Project Authors. All Rights Reserved.
+-# Copyright 2016-2026 The OpenSSL Project Authors. All Rights Reserved.
 -#
 -# Licensed under the Apache License 2.0 (the "License").  You may not use
 -# this file except in compliance with the License.  You can obtain a copy
@@ -3409,6 +3410,8 @@ deleted file mode 100644
 -plan skip_all => "Test is disabled on MacOS" if config('target') =~ m|^darwin|;
 -# AIX reports symbol names differently
 -plan skip_all => "Test is disabled on AIX" if config('target') =~ m|^aix|;
+-plan skip_all => "This is unsupported on native Windows"
+-    if $^O eq 'MSWin32';
 -plan skip_all => "This is unsupported on platforms that don't have 'nm'"
 -    unless IPC::Cmd::can_run('nm');
 -
@@ -3448,9 +3451,10 @@ deleted file mode 100644
 -my %stsymbols;                  # Static library symbols
 -my %shsymbols;                  # Shared library symbols
 -my %defsymbols;                 # Symbols taken from ordinals
+-my $null_device = devnull();
 -foreach (sort keys %stlibname) {
--    my $stlib_cmd = "nm -Pg $stlibpath{$_} 2> /dev/null";
--    my $shlib_cmd = "nm -DPg $shlibpath{$_} 2> /dev/null";
+-    my $stlib_cmd = "nm -Pg $stlibpath{$_} 2> $null_device";
+-    my $shlib_cmd = "nm -DPg $shlibpath{$_} 2> $null_device";
 -    my @stlib_lines;
 -    my @shlib_lines;
 -    *OSTDERR = *STDERR;
@@ -3480,7 +3484,7 @@ deleted file mode 100644
 -        indir $bldtop => sub {
 -            my $mkdefpath = srctop_file("util", "mkdef.pl");
 -            my $def_path = srctop_file("util", "lib$_.num");
--            my $def_cmd = "$^X $mkdefpath --ordinals $def_path --name $_ --OS linux 2> /dev/null";
+-            my $def_cmd = "$^X $mkdefpath --ordinals $def_path --name $_ --OS linux 2> $null_device";
 -            @def_lines = map { s|\R$||; $_ } `$def_cmd`;
 -            if ($? != 0) {
 -                note "running 'cd $bldtop; $def_cmd' => $?";

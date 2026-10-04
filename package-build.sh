@@ -42,6 +42,7 @@ fi
 if test -f pizfix/lib/libyolocosmo.a
 then
     flavor=cosmo
+    build_name_base="cosmo-filc"
 elif test -f pizfix/lib/libc.so.6666
 then
     echo "This is a glibc build.  package-build.sh does not package the glibc" \
@@ -52,6 +53,7 @@ then
     exit 1
 else
     flavor=musl
+    build_name_base="filc"
 fi
 
 # The cosmo APE tooling (pizfix/libexec/apelink and pizfix/libexec/pecheck)
@@ -64,7 +66,7 @@ then
     exit 1
 fi
 
-build_name=filc-0.686-$OS-$ARCH
+build_name=$build_name_base-0.686-$OS-$ARCH
 
 rm -rf $build_name
 

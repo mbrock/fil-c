@@ -10176,7 +10176,14 @@ static int mlock_impl(filc_thread* my_thread, filc_ptr addr_ptr, size_t len,
        guessing someone might do this to check capabilities. */
     if (len) {
         filc_check_access(addr_ptr, len, filc_read_access);
-        check_mmap(addr_ptr);
+        filc_object* object = filc_ptr_object(addr_ptr);
+        PAS_ASSERT(object);
+        if (!(filc_object_get_flags(object) & FILC_OBJECT_FLAG_MMAP)) {
+            /* mlock on memory that was not mmapped returns an error instead of panicking.  Linux says
+               that this errno is ENOMEM.  See https://github.com/pizlonator/fil-c/issues/329. */
+            filc_set_errno(ENOMEM);
+            return -1;
+        }
     }
     return FILC_SYSCALL(my_thread, actual_mlock(filc_ptr_ptr(addr_ptr), len));
 }

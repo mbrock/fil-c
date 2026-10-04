@@ -1604,7 +1604,7 @@ function sarcasm.compile(stmts, fileDirective, debug, target)
 end
 
 local PROGNAME = "sarcasm"
-local VERSION = "0.1.0"
+local VERSION = "0.686"
 
 local USAGE = "usage: " .. PROGNAME .. " [-o <file>] [-g] [-S|--no-assemble] [--x86_64|--arm64] [--intel|--at&t] [--as <command>] <input.s>"
 

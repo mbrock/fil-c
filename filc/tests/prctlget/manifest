@@ -4,5 +4,8 @@ return:
 output-includes:
   - "prctl ok"
 
+only-on-platform:
+  x86_64
+
 # This tests prctls that cosmo doesn't have.
 unsupportedOnCOSMO: true

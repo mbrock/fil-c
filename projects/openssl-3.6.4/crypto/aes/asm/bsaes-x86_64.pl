@@ -1378,15 +1378,16 @@ $code.=<<___;
 	pxor	%xmm0, %xmm0
 ___
 if ($ENV{SARCASM}) {
-  # SARCASM: wipe the GC buffer (gas compares against %rbp, the fixed
-  # frame base, which is meaningless for a GC pointer). %ebx holds the
+  # SARCASM: recompute the key-schedule wipe bound (gas compares against
+  # %rbp, the fixed frame top, as the end pointer, but %rbp never covered
+  # the GC .alloca, so rebuild end=base+size in %r11). %ebx holds the
   # round count on both paths (hoisted prologue above).
   $code.=<<___;
 	mov	%ebx, %r11d
 	shl	\$7, %r11		# 128 bytes per inner round key
 	sub	\$`128-32`, %r11	# size of bit-sliced key schedule
 	mov	%fil_ks_ecb_enc, %r10
-	add	%r10, %r11		# region end
+	add	%r10, %r11		# key schedule end (== %rbp, sans frame-base read)
 ___
 }
 $code.=<<___;
@@ -1656,15 +1657,16 @@ $code.=<<___;
 	pxor	%xmm0, %xmm0
 ___
 if ($ENV{SARCASM}) {
-  # SARCASM: wipe the GC buffer (gas compares against %rbp, the fixed
-  # frame base, which is meaningless for a GC pointer). %ebx holds the
+  # SARCASM: recompute the key-schedule wipe bound (gas compares against
+  # %rbp, the fixed frame top, as the end pointer, but %rbp never covered
+  # the GC .alloca, so rebuild end=base+size in %r11). %ebx holds the
   # round count on both paths (hoisted prologue above).
   $code.=<<___;
 	mov	%ebx, %r11d
 	shl	\$7, %r11		# 128 bytes per inner round key
 	sub	\$`128-32`, %r11	# size of bit-sliced key schedule
 	mov	%fil_ks_ecb_dec, %r10
-	add	%r10, %r11		# region end
+	add	%r10, %r11		# key schedule end (== %rbp, sans frame-base read)
 ___
 }
 $code.=<<___;

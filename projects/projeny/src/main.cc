@@ -27,6 +27,7 @@
 
 #include <cctype>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -37,7 +38,8 @@ int usage(const char* arg0, bool err)
     FILE* f = err ? stderr : stdout;
     fprintf(f,
             "usage: %s "
-            "<setup|commit|add|rm|mv|resolve|rebase|status|diff|patch|package|extract|"
+            "<setup|commit|add|rm|mv|resolve|rebase|create|status|diff|patch|"
+            "package|extract|"
             "download|erase-setup|freeze-mtime|unfreeze-mtime|list-frozen-mtimes|get-attributes|hash|"
             "help> "
             "[args]\n"
@@ -48,6 +50,10 @@ int usage(const char* arg0, bool err)
             "  mv <f.projeny|dir> <src> <dst>\n"
             "  resolve <f.projeny|dir> <path>\n"
             "  rebase <f.projeny|dir> <new-tarball>\n"
+            "  rebase <f.projeny|dir> <url> [<hash>] [<url> [<hash>]...]\n"
+            "  create <f.projeny> <new-tarball> [--comment <text>]\n"
+            "         [--origname <name>] [--force] [--erase-snapshots]\n"
+            "  create <f.projeny> <url> [<hash>] [<url> [<hash>]...]\n"
             "  status <f.projeny|dir>\n"
             "  diff <f.projeny|dir>\n"
             "  diff <dir> <other-dir>\n"
@@ -66,7 +72,9 @@ int usage(const char* arg0, bool err)
             "  options for setup/package/extract/download: -j[--jobs] N, "
             "-c[--curl-jobs] N\n"
             "  options for erase-setup: -j[--jobs] N, --erase-snapshots, "
-            "--force\n",
+            "--force\n"
+            "  options for create: --comment TEXT, --origname NAME,\n"
+            "                      --force, --erase-snapshots\n",
             arg0);
     return err ? 1 : 0;
 }
@@ -255,6 +263,55 @@ int main(int argc, char** argv)
                 return usage(arg0.c_str(), true);
             return cmd_erase_setup_multi(rest, jobs, erase_snapshots, force);
         }
+        // create parses its options anywhere among the arguments, exactly
+        // like erase-setup: the valueless --force (countable) and
+        // --erase-snapshots flags, plus the valued --comment/--origname.
+        // It never downloads in parallel and has no -j/-c surface: those
+        // spellings are unknown options here, named without their attached
+        // value so every form reports alike.
+        if (cmd == "create") {
+            std::string comment;
+            std::optional<std::string> origname;
+            int force = 0;
+            bool erase_snapshots = false;
+            std::vector<std::string> rest;
+            for (size_t i = 1; i < args.size(); ++i) {
+                const std::string& tok = args[i];
+                if (tok == "--comment") {
+                    if (i + 1 >= args.size())
+                        die("option " + tok + " requires a value");
+                    comment = args[++i];
+                } else if (starts_with(tok, "--comment=")) {
+                    comment = tok.substr(10);
+                } else if (tok == "--origname") {
+                    if (i + 1 >= args.size())
+                        die("option " + tok + " requires a value");
+                    origname = args[++i];
+                } else if (starts_with(tok, "--origname=")) {
+                    origname = tok.substr(11);
+                } else if (tok == "--force") {
+                    ++force;
+                } else if (tok == "--erase-snapshots") {
+                    erase_snapshots = true;
+                } else if (tok.size() > 2 && starts_with(tok, "-c") &&
+                           looks_like_jobs_value(tok.substr(2))) {
+                    die("unknown option '-c'");
+                } else if (tok.size() > 2 && starts_with(tok, "-j") &&
+                           looks_like_jobs_value(tok.substr(2))) {
+                    die("unknown option '-j'");
+                } else if (starts_with(tok, "-")) {
+                    die("unknown option '" + tok + "'");
+                } else {
+                    rest.push_back(tok);
+                }
+            }
+            if (rest.size() < 2)
+                return usage(arg0.c_str(), true);
+            return cmd_create(
+                rest[0],
+                std::vector<std::string>(rest.begin() + 1, rest.end()),
+                comment, origname, force, erase_snapshots);
+        }
         if (cmd == "commit") {
             if (args.size() != 2)
                 return usage(arg0.c_str(), true);
@@ -281,9 +338,11 @@ int main(int argc, char** argv)
             return cmd_resolve(args[1], args[2]);
         }
         if (cmd == "rebase") {
-            if (args.size() != 3)
+            if (args.size() < 3)
                 return usage(arg0.c_str(), true);
-            return cmd_rebase(args[1], args[2]);
+            return cmd_rebase(args[1],
+                              std::vector<std::string>(args.begin() + 2,
+                                                       args.end()));
         }
         if (cmd == "status") {
             if (args.size() != 2)

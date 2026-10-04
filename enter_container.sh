@@ -298,6 +298,22 @@ RUN apt-get install -y \
     clang lld cmake ninja-build ruby \
     patchelf bison flex texinfo gettext autopoint
 
+# Dependencies for the cosmo (APE) flavor of Fil-C: build_yolocosmo.sh
+# cross-compiles compiler-rt and libpas for aarch64 using the host clang plus
+# the aarch64 cross binutils and headers, aarch64 binaries are run under
+# qemu-aarch64, and cosmo's build needs unzip to unpack its toolchain on
+# first use.  The libstdc++ cross headers package is named after the cross
+# GCC version, which differs between Ubuntu releases, so try 13 first and
+# fall back to 12.
+RUN apt-get install -y \
+    unzip \
+    qemu-user \
+    gcc-aarch64-linux-gnu \
+    libc6-dev-arm64-cross \
+    linux-libc-dev-arm64-cross && \
+    (apt-get install -y libstdc++-13-dev-arm64-cross || \
+     apt-get install -y libstdc++-12-dev-arm64-cross)
+
 # Install basic utilities for development and version control
 RUN apt-get install -y curl vim git
 

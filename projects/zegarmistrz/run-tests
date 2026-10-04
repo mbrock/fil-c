@@ -32,6 +32,10 @@ gcc -O2 -static -o "$OUTDIR/static_hi" tests/static_hi.c || { log "guest compile
 for t in poison_load poison_store poison_branch poison_index poison_unpoison poison_clear poison_syscall; do
     gcc -O2 -o "$OUTDIR/$t" "tests/$t.c" 2>/dev/null || { log "guest compile failed: $t"; exit 1; }
 done
+# CPUID presence + header-only client library tests.
+gcc -O2 -o "$OUTDIR/cpuid_vendor" tests/cpuid_vendor.c || { log "guest compile failed: cpuid_vendor"; exit 1; }
+gcc -O2 -Iinclude -o "$OUTDIR/zegarmistrz_lib" tests/zegarmistrz_lib.c || { log "guest compile failed: zegarmistrz_lib"; exit 1; }
+gcc -O2 -Iinclude -o "$OUTDIR/poison_header" tests/poison_header.c || { log "guest compile failed: poison_header"; exit 1; }
 # Masked/compress poisoning tests use AVX512 intrinsics (run only under the
 # emulator, expecting core dumps like the other poison-* fault tests).
 for t in poison_masked_load poison_masked_store poison_compress_expand; do
@@ -87,6 +91,11 @@ echo "poison-masked-store"
 echo "poison-compress-expand"
 echo "poison-unpoison"
 echo "poison-clear"
+echo "cpuid-emulated"
+echo "cpuid-native"
+echo "zeglib-emulated"
+echo "zeglib-native"
+echo "poison-header"
 echo "core-gdb"
 echo "no-core"
 } | xargs -P "$JOBS" -I{} bash -c '
@@ -94,6 +103,15 @@ set -u
 t="{}"
 case "$t" in
   filc-hello)
+    # Environment gate (like avx512/aes/core-gdb below): this test needs
+    # the repo-root Fil-C hello (an ELF PIE that prints "Hello!"). If
+    # ./hello is not an ELF file — e.g. it is a Cosmopolitan APE image,
+    # which starts with an MZ header — the loader rejects it before any
+    # instruction runs, so skip rather than report a bogus failure.
+    if [ "$(dd if=../../hello bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d " \n")" != "7f454c46" ]; then
+      echo "SKIP filc-hello (repo-root ./hello is not a Fil-C ELF)"
+      exit 0
+    fi
     out=$(timeout 120 ./zegarmistrz ../../hello 2>/dev/null); ec=$?
     [ "$ec" = 0 ] && [ "$out" = "Hello!" ] && echo "PASS filc-hello" || echo "FAIL filc-hello: exit=$ec out=[$out]"
     ;;
@@ -164,6 +182,39 @@ argv[2]=bar" ] && echo "PASS args-exit" || echo "FAIL args-exit: exit=$ec out=[$
   poison-clear)
     out=$(cd test-output && timeout 60 ../zegarmistrz ./poison_clear 2>/dev/null); ec=$?
     [ "$ec" = 0 ] && [ "$out" = "clear-ok" ] && echo "PASS poison-clear" || echo "FAIL poison-clear: exit=$ec out=[$out]"
+    ;;
+  cpuid-emulated)
+    out=$(timeout 60 ./zegarmistrz test-output/cpuid_vendor 2>/dev/null); ec=$?
+    [ "$ec" = 0 ] && [ "$out" = "cpuid-zegarmistrz" ] && echo "PASS cpuid-emulated" || echo "FAIL cpuid-emulated: exit=$ec out=[$out]"
+    ;;
+  cpuid-native)
+    out=$(timeout 60 test-output/cpuid_vendor 2>/dev/null); ec=$?
+    [ "$ec" = 0 ] && [ "$out" = "cpuid-native" ] && echo "PASS cpuid-native" || echo "FAIL cpuid-native: exit=$ec out=[$out]"
+    ;;
+  zeglib-emulated)
+    out=$(timeout 60 ./zegarmistrz test-output/zegarmistrz_lib 2>/dev/null); ec=$?
+    [ "$ec" = 0 ] && [ "$out" = "zeglib-zegarmistrz" ] && echo "PASS zeglib-emulated" || echo "FAIL zeglib-emulated: exit=$ec out=[$out]"
+    ;;
+  zeglib-native)
+    out=$(timeout 60 test-output/zegarmistrz_lib 2>/dev/null); ec=$?
+    [ "$ec" = 0 ] && [ "$out" = "zeglib-native" ] && echo "PASS zeglib-native" || echo "FAIL zeglib-native: exit=$ec out=[$out]"
+    ;;
+  poison-header)
+    # include/zegarmistrz.h client library end-to-end: natively every
+    # service call is a no-op (exit 0); under the emulator the poison call
+    # must actually reach the emulator, so the cannot-store store faults
+    # with a guest core dump.
+    nat=ok
+    timeout 60 test-output/poison_header >/dev/null 2>&1 || nat=bad
+    rm -f test-output/zegarmistrz.core.poison_header.*
+    (cd test-output && timeout 120 ../zegarmistrz ./poison_header >/dev/null 2>poison_header.err.txt); ec=$?
+    core=$(ls test-output/zegarmistrz.core.poison_header.* 2>/dev/null | head -1)
+    if [ "$nat" = ok ] && [ "$ec" = 139 ] && [ -n "$core" ] && [ -f "$core" ]; then
+      echo "PASS poison-header"
+    else
+      echo "FAIL poison-header: native=$nat ec=$ec core=[$core]"
+    fi
+    rm -f test-output/zegarmistrz.core.poison_header.* test-output/poison_header.err.txt
     ;;
   core-gdb)
     if ! command -v gdb >/dev/null 2>&1; then echo "SKIP core-gdb (no gdb)"; exit 0; fi

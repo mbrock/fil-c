@@ -39,7 +39,7 @@ conversion, CLI, parallel tests, `./build_zegarmistrz.sh`.
 ```bash
 sudo apt-get install -y libzydis-dev libzycore-dev   # Zydis decoder
 make -j$(nproc)        # builds ./zegarmistrz
-./run-tests            # builds guests, runs 15 tests in parallel (xargs -P)
+./run-tests            # builds guests, runs 24 tests in parallel (xargs -P)
 ./check-isa.sh         # verify ISA coverage against binaries
 ./zegarmistrz <program> [args...]
 ./zegarmistrz -v ./hello                             # trace instructions
@@ -54,7 +54,11 @@ create/join + mutex), `args-exit` (argv passing + exit code 42),
 `avx512-smoke` + `aes-smoke` + `vex-smoke` (native-vs-emulated
 differentials, skipped if the host lacks the features),
 `poison-{load,store,branch,index,syscall}` (each must dump core),
-`poison-unpoison` + `poison-clear` (must exit 0), `core-gdb`
+`poison-unpoison` + `poison-clear` (must exit 0), `cpuid-emulated` +
+`cpuid-native` + `zeglib-emulated` + `zeglib-native` (CPUID presence and
+the `include/zegarmistrz.h` client library, each run under the emulator
+and natively), `poison-header` (header-library poison must fault under
+the emulator; the native run exits 0), `core-gdb`
 (`gdb -batch -ex bt` shows guest `boom` → `main`, no interpreter
 frames), `no-core` (`--no-core` writes no core). It does not touch
 `filc/tests`.
@@ -64,25 +68,31 @@ frames), `no-core` (`--no-core` writes no core). It does not touch
 
 ## Layout
 
-- `include/cpu.h` — `GPRValue` (`uint64_t val` + `cannot_branch` /
+- `include/zegarmistrz.h` — header-only C client library for guests:
+  `is_in_zegarmistrz()` (uncached detection via two inline-asm CPUIDs),
+  `zegarmistrz_query()`, `zegarmistrz_poison_range()`,
+  `zegarmistrz_unpoison_range()`, `zegarmistrz_client_request()`; all
+  static inline, compiler-defensive (asm-opaque call target), all no-ops
+  outside the emulator.
+- `src/cpu.h` — `GPRValue` (`uint64_t val` + `cannot_branch` /
   `cannot_index` sidecars), `XMMValue` (64-byte ZMM + sidecars), `CPU`
   (gpr[16], rip, rflags CF/PF/AF/ZF/SF/OF/DF, xmm[32], fs/gs_base,
   mxcsr, minimal x87, thread bookkeeping).
-- `include/mem.h`, `src/mem.cpp` — common memory pipeline
+- `src/mem.h`, `src/mem.cpp` — common memory pipeline
   (`mem_load8/16/32/64`, `mem_store*`, wide vector access,
   `mem_read_code`, `mem_copy`). Guest VA == host VA so the fast path
   is `memcpy`, but every access flows through here (poison checks +
   SIGSEGV/SIGBUS recovery via thread-local `sigsetjmp`, translated to
   guest core dumps). Poison map (`mem_poison_range`) + magic-call
   handler included.
-- `include/elf_loader.h`, `src/elf_loader.cpp` — minimal ELF64 loader:
+- `src/elf_loader.h`, `src/elf_loader.cpp` — minimal ELF64 loader:
   maps each object's `PT_LOAD`s with `mmap(MAP_FIXED)` (anonymous +
   `pread`, then `mprotect` to final perms). `ET_DYN` bases come from a
   `mmap(NULL)` reservation; the main exe reserves +1 GB of contiguous
   brk growth room in the same reservation (so virtualized `brk` can
   never stomp host mappings). Loads `PT_INTERP` first, exposes entry /
   `AT_PHDR` (file-offset→vaddr translated) / `AT_ENTRY` / `AT_BASE`.
-- `include/syscall.h`, `src/syscall.cpp` — `SYSCALL` emulation:
+- `src/syscall.h`, `src/syscall.cpp` — `SYSCALL` emulation:
   number from `RAX`, args from `RDI,RSI,RDX,R10,R8,R9`, return in
   `RAX` (negative errno), `RCX`=`RIP`/`R11`=`RFLAGS` clobber.
   Virtualized: `brk` (per-process, capped at reservation),
@@ -97,13 +107,15 @@ frames), `no-core` (`--no-core` writes no core). It does not touch
   openat/read/write/close/lseek/fstat, rseq/set_robust_list/
   set_tid_address, getrandom, prlimit64, ...). Tainted
   (`cannot_branch`/`cannot_index`) syscall args are rejected.
-- `include/decode_exec.h`, `src/decode_exec.cpp` — fetch/decode/
+- `src/decode_exec.h`, `src/decode_exec.cpp` — fetch/decode/
   dispatch/execute. **Decoder: system Zydis** (CMake config
   `libzydis-dev`, no pkg-config file; `Makefile` falls back to
   `-lZydis -lZycore`). A global `LOCK`-prefix bus mutex (`g_bus_lock`)
   serializes `LOCK`ed RMWs plus implicitly-locked `XCHG`/`CMPXCHG8B`/
   `16B` across guest threads. `CPUID` masks AVX512/AMX/SHA (phase 1
-  implements up to AVX2; guests then avoid EVEX paths); `RDRAND`/
+  implements up to AVX2; guests then avoid EVEX paths); CPUID also
+  reports zegarmistrz's presence (hypervisor bit + vendor leaf, see
+  below). `RDRAND`/
   `RDSEED`/`CRC32` pass through to the host; `XSAVE/XRSTOR/FXSAVE`
   save/restore x87+SSE+AVX state (other components zeroed/skipped);
   shadow-stack reads report 0; `RDPID` returns 0. Unimplemented
@@ -115,6 +127,24 @@ frames), `no-core` (`--no-core` writes no core). It does not touch
   backtraces (debug aid).
 - `tests/` — guest sources (`args.c`, `threads.c`, `static_hi.c`);
   `test-output/` — build/run artifacts.
+
+## Presence (CPUID)
+
+Per `cpuid.txt` (repo root), zegarmistrz reveals itself through the CPUID
+hypervisor convention:
+
+- `CPUID.1:ECX` bit 31 — the "hypervisor present" bit (reserved zero on
+  real silicon) is set.
+- Hypervisor leaf `0x40000000` returns the max hypervisor leaf in `EAX`
+  (`0x40000000`) and the 12-byte vendor signature `"Zegarmistrz\0"` in
+  `EBX:ECX:EDX`. Leaves `0x40000001`-`0x4000FFFF` read as zero — the
+  host's own hypervisor leaves never leak through.
+
+Guest-side detection is `is_in_zegarmistrz()` from `include/zegarmistrz.h`
+(no caching; both CPUID instructions run on every call, in inline
+assembly; gate on bit 31 first, then match the signature — exactly the
+cpuid.txt recipe). Tests: `cpuid_vendor` runs both natively (no match
+expected) and under the emulator (signature expected).
 
 ## RFLAGS / operand notes
 
@@ -146,7 +176,7 @@ frames), `no-core` (`--no-core` writes no core). It does not touch
   clear+wake); only `SYS_exit_group` (or `exit` from the main thread)
   ends the process. `run_cpu_loop` must not `catch(...)` or it eats
   `pthread_exit`'s forced unwinding.
-- `Makefile` tracks `include/*.h` dependencies — struct layout
+- `Makefile` tracks `src/*.h` dependencies — struct layout
   changes without a rebuild link incompatible objects (this once
   masqueraded as heap corruption).
 - `SAR` (and any width logic): widths are bytes, not bits.
@@ -196,6 +226,11 @@ frames), `no-core` (`--no-core` writes no core). It does not touch
 
 ## Poisoning ABI (phase 2)
 
+The canonical guest-side entry points are zegarmistrz_poison_range() /
+zegarmistrz_unpoison_range() / zegarmistrz_query() from
+include/zegarmistrz.h (header-only, no-ops outside the emulator); the
+raw ABI below is what they emit.
+
 Client request: `CALL` to `0x1410141014101410` with `RDI=op`,
 `RSI=ptr`, `RDX=size`, `RCX=flags`; returns 0 in `RAX`:
 
@@ -226,7 +261,7 @@ throw guest errors → ELF core dumps.
 ## Status / phase 2
 
 Works: `./hello` → `Hello!` (exit 0), static/dynamic/threaded guests,
-full `run-tests` green (16 tests, parallel), zero compiler warnings.
+full `run-tests` green (24 tests, parallel), zero compiler warnings.
 Threads, futexes, TLS (`FS`), `rseq`, robust lists, `brk`, `mmap`,
 AVX/AVX2, BMI/BMI2 (incl. `BEXTR`), x87 (+`FLDENV`/`FNSTENV`), `XSAVE`,
 `RDPKRU`/`WRPKRU` — all exercised by the loader + libc + Fil-C runtime

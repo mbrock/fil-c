@@ -24,7 +24,7 @@
 # zegarmistrz -- x86-64 user-mode emulator
 
 CXX ?= g++
-CXXFLAGS ?= -std=c++20 -O2 -g -Wall -D_GNU_SOURCE -Iinclude
+CXXFLAGS ?= -std=c++20 -O2 -g -Wall -D_GNU_SOURCE
 LDFLAGS ?= -pthread
 
 # Zydis comes from the system (apt install libzydis-dev libzycore-dev).
@@ -41,11 +41,11 @@ all: zegarmistrz
 zegarmistrz: $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(ZYDIS_LIBS)
 
-src/%.o: src/%.cpp $(wildcard include/*.h)
+src/%.o: src/%.cpp $(wildcard src/*.h)
 	$(CXX) $(CXXFLAGS) $(ZYDIS_CFLAGS) -c -o $@ $<
 
 # Headers change struct layouts; objects must rebuild.
-src/main.o src/mem.o src/elf_loader.o src/syscall.o src/decode_exec.o: $(wildcard include/*.h)
+src/main.o src/mem.o src/elf_loader.o src/syscall.o src/decode_exec.o: $(wildcard src/*.h)
 
 clean:
 	rm -f zegarmistrz $(OBJS)

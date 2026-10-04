@@ -10,6 +10,10 @@ Numeric numeric;
 // PRE: %union.Hidden = type { <{ [1 x ptr] }> }
 // PRE: %union.Numeric = type { i64 }
 static_assert(sizeof(Hidden) == 8 && sizeof(Numeric) == 8);
+// PRE-DAG: %union.NestedMember = type { <{ [1 x ptr] }> }
+// PRE-DAG: %union.BaseMember = type { <{ [1 x ptr] }> }
+// PRE-DAG: %union.VptrMember = type { <{ [1 x ptr] }> }
+// PRE-DAG: %union.FunctionMember = type { <{ [2 x ptr] }> }
 
 struct Owner { int value; };
 union Member { int Owner::*member; void *pointer; };
@@ -19,6 +23,38 @@ thread_local Member tlsMember;
 // rather than manufacturing a pointer from the all-ones integer pattern.
 // PRE: @member = {{.*}}global { i64 } { i64 -1 }, align 8
 // PRE: @tlsMember = {{.*}}thread_local global { i64 } { i64 -1 }, align 8
+
+// Nonzero null initialization must explicitly zero both nested padding and
+// the union's extra word. Undef here lets optimization discard heap checks.
+struct PaddedZero { unsigned char byte; unsigned int word; };
+struct NullPayload { PaddedZero zero; int Owner::*member; };
+union PaddedChoice { NullPayload payload; void *pointers[3]; };
+PaddedChoice padded;
+// PRE: @padded = {{.*}}global {{.*}}[8 x i8] zeroinitializer, i64 -1 }, [8 x i8] zeroinitializer }
+
+// Detection scans every lowered alternative, even after nonzero-null storage
+// selection and when the pointer-bearing alternative is nested or comes last.
+union NestedMember { unsigned long bits; Member value; };
+NestedMember nestedMember;
+
+// Pointer leaves in lowered bases, vptrs and member-function representations
+// must also be visible without a second walk over the source-level types.
+struct PointerBase { void *pointer; };
+struct Inherited : PointerBase {};
+union BaseMember { unsigned long bits; Inherited value; };
+BaseMember baseMember;
+
+struct VirtualOwner { virtual ~VirtualOwner(); };
+union VptrMember {
+  unsigned long bits;
+  VirtualOwner object;
+  VptrMember() : bits(0) {}
+  ~VptrMember() {}
+};
+VptrMember vptrMember;
+
+union FunctionMember { unsigned long bits[2]; int (Owner::*method)(); };
+FunctionMember functionMember;
 
 // A plain pointer-only copy is still promotable. Normalized storage supplies
 // the pointer type, even though this function never accesses a union member.

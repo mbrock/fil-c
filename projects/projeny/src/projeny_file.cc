@@ -311,6 +311,39 @@ std::string archive_name_from_url(const std::string& url)
     return name;
 }
 
+std::string replace_archive_url_headers(const std::string& head,
+                                        const std::vector<ProjenyUrl>& urls)
+{
+    // Remove every Archive:/URL: line; remember where the first one stood.
+    // Scanning stops at the first empty line: that is where the header block
+    // ends, and callers pass only the header block (ProjenyFile::parse keeps
+    // the blank-line terminator out of head) — the guard just keeps a future
+    // caller from silently scanning into the file's body.
+    std::vector<std::string> kept;
+    size_t insert_at = 0; // the head's top when no line is removed
+    bool removed = false;
+    for (const std::string& l : split_lines(head)) {
+        if (l.empty())
+            break;
+        bool is_archive =
+            l.size() > 8 && l.compare(0, 8, "Archive:") == 0;
+        bool is_url = l.size() > 4 && l.compare(0, 4, "URL:") == 0;
+        if (!is_archive && !is_url) {
+            kept.push_back(l);
+            continue;
+        }
+        if (!removed) {
+            removed = true;
+            insert_at = kept.size();
+        }
+    }
+    // The new URL: lines take the removed lines' place (or lead the head).
+    kept.insert(kept.begin() + (long)insert_at, urls.size(), std::string());
+    for (size_t i = 0; i < urls.size(); ++i)
+        kept[insert_at + i] = "URL: " + urls[i].url + " " + urls[i].hash;
+    return join_lines(kept);
+}
+
 namespace {
 
 // A URL: header value must be exactly "<url> <blake3-hash>" (two

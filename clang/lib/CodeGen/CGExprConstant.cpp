@@ -2598,8 +2598,14 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
     (asCompleteObject ? layout.getLLVMType()
                       : layout.getBaseSubobjectLLVMType());
 
+  // Zero initialization includes padding. Seed the entire byte extent before
+  // overlaying nonzero null representations; builder gaps otherwise use undef.
+  ConstantAggregateBuilder Builder(CGM);
+  llvm::Constant *ZeroBytes = llvm::Constant::getNullValue(llvm::ArrayType::get(
+      CGM.CharTy, CGM.getDataLayout().getTypeAllocSize(structure)));
+  Builder.add(ZeroBytes, CharUnits::Zero(), false);
+
   if (layout.hasPointerWordStorage()) {
-    ConstantAggregateBuilder Builder(CGM);
     // Initialize the first named member, including an anonymous aggregate
     // containing named members. Let Clang's existing null emitter handle that
     // member's arrays, bases, nested unions, and ABI-specific member pointers.
@@ -2610,10 +2616,14 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
         continue;
       if (!Field->isBitField() &&
           !isEmptyFieldForLayout(CGM.getContext(), Field)) {
-        bool Added = Builder.add(CGM.EmitNullConstant(Field->getType()),
-                                 CharUnits::Zero(), false);
-        assert(Added && "Cannot lay out union null initializer");
-        (void)Added;
+        llvm::Constant *Member = CGM.EmitNullConstant(Field->getType());
+        // A zero aggregate's implicit LLVM padding would replace our explicit
+        // zero bytes. Leave the seed intact for wholly zero aggregates.
+        if (!isa<llvm::ConstantAggregateZero>(Member)) {
+          bool Added = Builder.add(Member, CharUnits::Zero(), true);
+          assert(Added && "Cannot lay out union null initializer");
+          (void)Added;
+        }
       }
       break;
     }
@@ -2698,11 +2708,12 @@ static llvm::Constant *EmitNullConstant(CodeGenModule &CGM,
 
   // A normalized union's null initializer may use integer/byte storage instead
   // of its object type. Preserve the containing record's exact byte offsets.
-  ConstantAggregateBuilder Builder(CGM);
   const llvm::StructLayout *SL = CGM.getDataLayout().getStructLayout(structure);
   for (unsigned I = 0; I < numElements; ++I) {
+    if (isa<llvm::ConstantAggregateZero>(elements[I]))
+      continue;
     bool Added = Builder.add(
-        elements[I], CharUnits::fromQuantity(SL->getElementOffset(I)), false);
+        elements[I], CharUnits::fromQuantity(SL->getElementOffset(I)), true);
     assert(Added && "Cannot lay out record null initializer");
     (void)Added;
   }

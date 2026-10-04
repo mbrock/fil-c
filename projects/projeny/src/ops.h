@@ -24,6 +24,7 @@
  */
 #pragma once
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -54,7 +55,39 @@ int cmd_rm(const std::string& projeny_arg, const std::string& path);
 int cmd_mv(const std::string& projeny_arg, const std::string& src,
            const std::string& dst);
 int cmd_resolve(const std::string& projeny_arg, const std::string& path);
-int cmd_rebase(const std::string& projeny_arg, const std::string& new_tarball);
+
+// Move the project's patch onto a new base archive. `new_archive_args` is
+// the tail after the project argument: either exactly one local tarball
+// path (legacy rebase of an Archive:-based project), or one or more URLs
+// each optionally followed by its blake3 hash (the new URL: headers; also
+// converts an Archive:-based project to URL:-based). A URL:-based project
+// accepts only URLs.
+int cmd_rebase(const std::string& projeny_arg,
+               const std::vector<std::string>& new_archive_args);
+
+// Create a brand-new .projeny file at `file_arg` (which must end in
+// ".projeny"; its pdir — the dirname — must exist) naming the archive in
+// `archive_args` — rebase's exact grammar: one local tarball path (copied
+// into the pdir) or one or more <url> [<blake3-hash>] pairs (downloaded,
+// verified, and recorded as URL: headers with the first verified download
+// cached as the snapshot) — and then run `setup` on it. `comment` is the
+// file's prose (--comment, empty when absent). `origname_opt` (--origname)
+// names the checkout directory: the file gets Name: <name> AND
+// Origname: <name>, which must match the archive's top-level directory.
+// `force_level` counts --force: 0 refuses an existing file; 1 erases the
+// existing project's setup state with the no-force check; 2+ erases
+// unconditionally. A pre-existing <pdir>/<origname> directory is erased at
+// force >= 1 only when it is attributable, and attribution consults two
+// sources in order: the file being replaced (when it exists, parses, and
+// has Name: <name>, its own erase then cleans up the checkout) and then
+// the <name>.projeny sibling, which is evicted; the guard refuses — at
+// any force level — only when neither source attributes the directory.
+// `erase_snapshots` passes through to every erase.
+int cmd_create(const std::string& file_arg,
+               const std::vector<std::string>& archive_args,
+               const std::string& comment,
+               const std::optional<std::string>& origname_opt,
+               int force_level, bool erase_snapshots);
 int cmd_status(const std::string& projeny_arg);
 int cmd_diff_projeny(const std::string& projeny_arg);
 int cmd_diff(const std::string& dir, const std::string& other_dir);
