@@ -53,6 +53,11 @@ static cl::opt<bool> verbose(
 static cl::opt<bool> ultraVerbose(
   "filc-ultra-verbose", cl::desc("Make FilC ultra verbose"),
   cl::Hidden, cl::init(false));
+static cl::opt<bool> copyLocalsForCallsOpt(
+  "filc-copy-locals-for-calls",
+  cl::desc("Keep locals on the stack when their address only escapes into nocapture call "
+           "arguments or constant-size memsets, by giving each such call a heap copy"),
+  cl::Hidden, cl::init(true));
 static cl::opt<bool> logAllocations(
   "filc-log-allocations", cl::desc("Make FilC emit code to log every allocation"),
   cl::Hidden, cl::init(false));
@@ -16111,6 +16116,177 @@ class Pizlonator {
       findNonescapingAllocasInFunction(F);
   }
 
+  // Escape analysis below heap-allocates any local whose address reaches a call. Two common
+  // shapes don't need that, and are rewritten first so the local can stay on the stack:
+  //
+  // - A constant-size memset into a local becomes ordinary stores.
+  // - A local whose address only escapes as nocapture arguments of calls gets a second local, its
+  //   call copy. Each such call gets the copy's address instead, with the local copied into it
+  //   before the call and back out after. The copy escapes and is allocated lazily, once, so the
+  //   heap allocation only happens on paths that make one of the calls. Memory safety does not depend on
+  //   the nocapture attribute: the copy is an ordinary escaping local. If a callee did capture the
+  //   pointer despite the attribute, later accesses through it would reach the copy instead of the
+  //   original local, which changes behavior but cannot violate safety.
+  //
+  // Functions that call setjmp are left alone; a longjmp out of the call would skip the copy-out.
+  static constexpr uint64_t MaxExpandedMemsetBytes = 256;
+
+  void expandLocalMemsetsInFunction(Function& F) {
+    std::vector<std::pair<MemSetInst*, uint64_t>> Memsets;
+    for (BasicBlock& BB : F) {
+      for (Instruction& I : BB) {
+        MemSetInst* MS = dyn_cast<MemSetInst>(&I);
+        if (!MS || MS->isVolatile())
+          continue;
+        ConstantInt* Len = dyn_cast<ConstantInt>(MS->getLength());
+        if (!Len || Len->getBitWidth() > 64 || !Len->getZExtValue()
+            || Len->getZExtValue() > MaxExpandedMemsetBytes)
+          continue;
+        APInt Offset(DL.getIndexTypeSizeInBits(MS->getDest()->getType()), 0);
+        Value* Base = MS->getDest()->stripAndAccumulateConstantOffsets(DL, Offset, true);
+        AllocaInst* AI = dyn_cast<AllocaInst>(Base);
+        if (!AI || !AI->isStaticAlloca() || Offset.isNegative())
+          continue;
+        Memsets.push_back({ MS, AI->getAlign() >= Align(WordSize) ? Offset.getZExtValue() : 1 });
+      }
+    }
+    for (auto& Pair : Memsets) {
+      MemSetInst* MS = Pair.first;
+      uint64_t BaseOffset = Pair.second;
+      IRBuilder<> B(MS);
+      B.SetCurrentDebugLocation(MS->getDebugLoc());
+      uint64_t Len = cast<ConstantInt>(MS->getLength())->getZExtValue();
+      Align DestAlign = MS->getDestAlign().valueOrOne();
+      Value* Byte = MS->getValue();
+      for (uint64_t Offset = 0; Offset < Len;) {
+        unsigned Width = 8;
+        while (Offset + Width > Len)
+          Width /= 2;
+        IntegerType* T = IntegerType::get(C, Width * 8);
+        Value* V;
+        if (ConstantInt* CB = dyn_cast<ConstantInt>(Byte))
+          V = ConstantInt::get(T, APInt::getSplat(Width * 8, CB->getValue().trunc(8)));
+        else {
+          V = B.CreateZExt(Byte, T);
+          if (Width > 1)
+            V = B.CreateMul(V, ConstantInt::get(T, APInt::getSplat(Width * 8, APInt(8, 1))));
+        }
+        Value* P = B.CreateConstGEP1_64(Int8Ty, MS->getDest(), Offset);
+        // memset clears capabilities, so a word that could hold a pointer is stored as a pointer
+        // (an int-to-pointer cast has no capability), not as an integer that would leave the
+        // old capability in place.
+        if (Width == WordSize && !((BaseOffset + Offset) % WordSize))
+          V = B.CreateIntToPtr(V, RawPtrTy);
+        B.CreateAlignedStore(V, P, commonAlignment(DestAlign, Offset));
+        Offset += Width;
+      }
+      MS->eraseFromParent();
+    }
+  }
+
+  void copyLocalsForCallsInFunction(Function& F) {
+    std::vector<AllocaInst*> Candidates;
+    for (Instruction& I : F.getEntryBlock()) {
+      AllocaInst* AI = dyn_cast<AllocaInst>(&I);
+      if (AI && AI->isStaticAlloca() && allocaHasSizeForUs(AI)
+          && originalAllocaSize(AI) <= MaxBytesBetweenPollchecks)
+        Candidates.push_back(AI);
+    }
+    for (AllocaInst* AI : Candidates) {
+      std::unordered_set<Value*> Derived { AI };
+      std::vector<Value*> Work { AI };
+      std::vector<CallInst*> Calls;
+      std::unordered_set<CallInst*> SeenCalls;
+      bool OK = true;
+      while (OK && !Work.empty()) {
+        Value* V = Work.back();
+        Work.pop_back();
+        for (User* U : V->users()) {
+          Instruction* UI = dyn_cast<Instruction>(U);
+          if (!UI) {
+            OK = false;
+            break;
+          }
+          if ((isa<GetElementPtrInst>(UI) && cast<GetElementPtrInst>(UI)->getPointerOperand() == V)
+              || isa<BitCastInst>(UI) || isa<AddrSpaceCastInst>(UI)) {
+            if (Derived.insert(UI).second)
+              Work.push_back(UI);
+            continue;
+          }
+          if (isa<LoadInst>(UI) || isa<LifetimeIntrinsic>(UI))
+            continue;
+          if (StoreInst* SI = dyn_cast<StoreInst>(UI)) {
+            if (SI->getValueOperand() != V)
+              continue;
+            OK = false;
+            break;
+          }
+          if (isa<MemIntrinsic>(UI))
+            continue;
+          CallInst* CI = dyn_cast<CallInst>(UI);
+          if (!CI || isa<IntrinsicInst>(CI) || CI->isInlineAsm() || CI->isMustTailCall()
+              || CI->hasOperandBundles() || CI->getCalledOperand() == V) {
+            OK = false;
+            break;
+          }
+          for (unsigned Idx = 0; Idx < CI->arg_size(); ++Idx) {
+            if (CI->getArgOperand(Idx) == V
+                && (!CI->paramHasAttr(Idx, Attribute::NoCapture) || CI->isByValArgument(Idx)
+                    || CI->paramHasAttr(Idx, Attribute::Returned)
+                    || CI->paramHasAttr(Idx, Attribute::Preallocated)
+                    || CI->paramHasAttr(Idx, Attribute::InAlloca))) {
+              OK = false;
+              break;
+            }
+          }
+          if (!OK)
+            break;
+          if (SeenCalls.insert(CI).second)
+            Calls.push_back(CI);
+        }
+      }
+      if (!OK || Calls.empty())
+        continue;
+      uint64_t Size = originalAllocaSize(AI);
+      AllocaInst* Copy = cast<AllocaInst>(AI->clone());
+      Copy->setName(AI->getName() + ".callcopy");
+      Copy->insertAfter(AI);
+      for (CallInst* CI : Calls) {
+        IRBuilder<> B(CI);
+        B.SetCurrentDebugLocation(CI->getDebugLoc());
+        B.CreateMemCpy(Copy, AI->getAlign(), AI, AI->getAlign(), Size);
+        std::unordered_map<Value*, Value*> Remapped { { AI, Copy } };
+        std::function<Value*(Value*)> Remap = [&] (Value* V) -> Value* {
+          auto It = Remapped.find(V);
+          if (It != Remapped.end())
+            return It->second;
+          Instruction* Clone = cast<Instruction>(V)->clone();
+          Clone->setOperand(0, Remap(cast<Instruction>(V)->getOperand(0)));
+          B.Insert(Clone);
+          Remapped[V] = Clone;
+          return Clone;
+        };
+        for (unsigned Idx = 0; Idx < CI->arg_size(); ++Idx) {
+          if (Derived.count(CI->getArgOperand(Idx)))
+            CI->setArgOperand(Idx, Remap(CI->getArgOperand(Idx)));
+        }
+        B.SetInsertPoint(CI->getNextNode());
+        B.CreateMemCpy(AI, AI->getAlign(), Copy, AI->getAlign(), Size);
+      }
+    }
+  }
+
+  void copyLocalsForCalls() {
+    if (!copyLocalsForCallsOpt)
+      return;
+    for (Function& F : M.functions()) {
+      if (F.isDeclaration() || F.callsFunctionThatReturnsTwice())
+        continue;
+      expandLocalMemsetsInFunction(F);
+      copyLocalsForCallsInFunction(F);
+    }
+  }
+
   void removeIrrelevantIntrinsics() {
     for (Function& F : M) {
       if (F.isDeclaration())
@@ -16639,6 +16815,7 @@ public:
     lockDownLinkage();
     convertMisalignedAtomicsToLibcalls();
     removeIrrelevantIntrinsics();
+    copyLocalsForCalls();
     findNonescapingAllocas();
     removeLifetimeIntrinsics();
     expandConstantExprs();
