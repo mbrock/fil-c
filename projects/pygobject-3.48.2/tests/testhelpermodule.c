@@ -383,23 +383,20 @@ test_gvalue_ret_callback (GObject *object, GType type)
   ret = g_malloc0 (sizeof (GValue));
   g_value_init (ret, type);
 
-  switch ((uintptr_t)type) {
-    case (uintptr_t)G_TYPE_INT:
+  /* pizlix/Fil-C: the Fil-C glib represents GType as an int-derived pointer
+   * type, so a switch over it does not compile; use an if/else chain over
+   * pointer equality instead. */
+  if ((uintptr_t) type == (uintptr_t) G_TYPE_INT) {
       g_value_set_int(ret, G_MAXINT);
-      break;
-    case (uintptr_t)G_TYPE_INT64:
+  } else if ((uintptr_t) type == (uintptr_t) G_TYPE_INT64) {
       g_value_set_int64(ret, G_MAXINT64);
-      break;
-    case (uintptr_t)G_TYPE_UINT:
+  } else if ((uintptr_t) type == (uintptr_t) G_TYPE_UINT) {
       g_value_set_uint(ret, G_MAXUINT);
-      break;
-    case (uintptr_t)G_TYPE_UINT64:
+  } else if ((uintptr_t) type == (uintptr_t) G_TYPE_UINT64) {
       g_value_set_uint64(ret, G_MAXUINT64);
-      break;
-    case (uintptr_t)G_TYPE_STRING:
+  } else if ((uintptr_t) type == (uintptr_t) G_TYPE_STRING) {
       g_value_set_string(ret, "hello");
-      break;
-    default:
+  } else {
       g_critical ("test_gvalue_ret_callback() does not support type %s", g_type_name (type));
   }
 

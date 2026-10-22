@@ -3,3 +3,59 @@ Origname: accountsservice-23.13.9
 Name: accountsservice
 
     accountsservice 23.13.9 (user account D-Bus service; gnome-shell's user menu + GDM greeter use its org.freedesktop.Accounts API). Releases moved to gitlab.freedesktop.org; the Debian pool orig tarball is the canonical tarball.
+diff --git a/accountsservice/generate-version.sh b/accountsservice/generate-version.sh
+--- a/accountsservice/generate-version.sh
++++ b/accountsservice/generate-version.sh
+@@ -9,7 +9,14 @@
+
+ # If it's not from a git checkout, assume it's from a tarball
+ if [ "$TOPLEVEL_WORKING_DIR" != "$CWD" ]; then
++    # pizlix/Fil-C: the packaged tree is named pizlonated-accountsservice and
++    # is not a git checkout, so the original dirname parse finds no version and
++    # the script would exit 1 ("Version unknown").  Fall back to the version of
++    # the release tarball this projeny project is pinned to.
+     VERSION_FROM_DIR_NAME=$(basename "$CWD" | sed -n 's/^accountsservice-\([^-]*\)$/\1/p')
++    if [ -z "$VERSION_FROM_DIR_NAME" ]; then
++        VERSION_FROM_DIR_NAME="23.13.9"
++    fi
+
+     if [ -n "$VERSION_FROM_DIR_NAME" ]; then
+         echo "$VERSION_FROM_DIR_NAME"
+diff --git a/accountsservice/meson.build b/accountsservice/meson.build
+--- a/accountsservice/meson.build
++++ b/accountsservice/meson.build
+@@ -232,7 +232,9 @@
+   subdir('doc/libaccountsservice')
+ endif
+
+-subdir('tests')
++if get_option('tests')
++  subdir('tests')
++endif
+
+ configure_file(
+   output: 'config.h',
+diff --git a/accountsservice/meson_options.txt b/accountsservice/meson_options.txt
+--- a/accountsservice/meson_options.txt
++++ b/accountsservice/meson_options.txt
+@@ -13,3 +13,5 @@
+
+ option('docbook', type: 'boolean', value: false, description: 'build documentation (requires xmlto)')
+ option('gtk_doc', type: 'boolean', value: false, description: 'use gtk-doc to build documentation')
++
++option('tests', type: 'boolean', value: false, description: 'build tests (pizlix addition: upstream always subdirs tests/, which drags in the mocklibc wrap subproject; that subproject does not even compile under C99-only warnings)')
+diff --git a/accountsservice/src/libaccountsservice/symbol.map b/accountsservice/src/libaccountsservice/symbol.map
+--- a/accountsservice/src/libaccountsservice/symbol.map
++++ b/accountsservice/src/libaccountsservice/symbol.map
+@@ -1,4 +1,10 @@
+ {
+-    local:
++    global:
++        /* Fil-C pizlonation exports pizlonated_<name> aliases for every
++         * exported function, and the daemon / g-ir-scanner dumper reference
++         * those aliases directly; they must not be caught by "local: *". */
++        pizlonated*;
+         _*;
++    local:
++        *;
+ };

@@ -4,3 +4,112 @@ Origname: gcr-4.3.0
 Name: gcr
 
     gcr 4.3.0 (GCR, cryptographic UI + certificate widgets; gcr-4 API needed by gnome-shell 46). Newest stable 4.3.x line at GNOME 46 time (4.3.90+/4.4 are GNOME 47 dev releases).
+diff --git a/gcr/gck/libgck.map b/gcr/gck/libgck.map
+--- a/gcr/gck/libgck.map
++++ b/gcr/gck/libgck.map
+@@ -2,6 +2,10 @@
+ global:
+   gck_*;
+   SECMEM_*;
++  /* Fil-C pizlonation exports pizlonated_<name> aliases for every exported
++     * function; consumers (gcr-viewer, the g-ir-scanner dumper) reference
++     * those aliases directly; they must not be caught by "local: *". */
++  pizlonated*;
+ local:
+   *;
+ };
+diff --git a/gcr/gcr/gcr-mock-prompter.c b/gcr/gcr/gcr-mock-prompter.c
+--- a/gcr/gcr/gcr-mock-prompter.c
++++ b/gcr/gcr/gcr-mock-prompter.c
+@@ -286,34 +286,29 @@
+
+ 	g_assert (G_VALUE_TYPE (a) == G_VALUE_TYPE (b));
+
+-	switch (G_VALUE_TYPE (a)) {
+-	case G_TYPE_BOOLEAN:
++	/* pizlix/Fil-C: the Fil-C glib represents GType as an int-derived
++	 * pointer type, so a switch over G_VALUE_TYPE() does not compile; use
++	 * an if/else chain over pointer equality instead. */
++	GType a_type = G_VALUE_TYPE (a);
++
++	if (a_type == G_TYPE_BOOLEAN) {
+ 		ret = (g_value_get_boolean (a) == g_value_get_boolean (b));
+-		break;
+-	case G_TYPE_UCHAR:
++	} else if (a_type == G_TYPE_UCHAR) {
+ 		ret = (g_value_get_uchar (a) == g_value_get_uchar (b));
+-		break;
+-	case G_TYPE_INT:
++	} else if (a_type == G_TYPE_INT) {
+ 		ret = (g_value_get_int (a) == g_value_get_int (b));
+-		break;
+-	case G_TYPE_UINT:
++	} else if (a_type == G_TYPE_UINT) {
+ 		ret = (g_value_get_uint (a) == g_value_get_uint (b));
+-		break;
+-	case G_TYPE_INT64:
++	} else if (a_type == G_TYPE_INT64) {
+ 		ret = (g_value_get_int64 (a) == g_value_get_int64 (b));
+-		break;
+-	case G_TYPE_UINT64:
++	} else if (a_type == G_TYPE_UINT64) {
+ 		ret = (g_value_get_uint64 (a) == g_value_get_uint64 (b));
+-		break;
+-	case G_TYPE_DOUBLE:
++	} else if (a_type == G_TYPE_DOUBLE) {
+ 		ret = (g_value_get_double (a) == g_value_get_double (b));
+-		break;
+-	case G_TYPE_STRING:
++	} else if (a_type == G_TYPE_STRING) {
+ 		ret = (g_strcmp0 (g_value_get_string (a), g_value_get_string (b)) == 0);
+-		break;
+-	default:
+-		g_critical ("no support for comparing of type %s", g_type_name (G_VALUE_TYPE (a)));
+-		break;
++	} else {
++		g_critical ("no support for comparing of type %s", g_type_name (a_type));
+ 	}
+
+ 	return ret;
+diff --git a/gcr/gcr/gcr-system-prompter.c b/gcr/gcr/gcr-system-prompter.c
+--- a/gcr/gcr/gcr-system-prompter.c
++++ b/gcr/gcr/gcr-system-prompter.c
+@@ -448,17 +448,16 @@
+ 		g_value_init (&value, pspec->value_type);
+ 		g_object_get_property (obj, property_name, &value);
+
+-		switch (pspec->value_type) {
+-		case G_TYPE_STRING:
++		/* pizlix/Fil-C: the Fil-C glib represents GType as an int-derived
++		 * pointer type, so a switch over it does not compile; use an
++		 * if/else chain over pointer equality instead. */
++		if (pspec->value_type == G_TYPE_STRING) {
+ 			type = G_VARIANT_TYPE ("s");
+-			break;
+-		case G_TYPE_INT:
++		} else if (pspec->value_type == G_TYPE_INT) {
+ 			type = G_VARIANT_TYPE ("i");
+-			break;
+-		case G_TYPE_BOOLEAN:
++		} else if (pspec->value_type == G_TYPE_BOOLEAN) {
+ 			type = G_VARIANT_TYPE ("b");
+-			break;
+-		default:
++		} else {
+ 			g_critical ("encountered unsupported property type on GcrPrompt: %s",
+ 			            g_type_name (pspec->value_type));
+ 			continue;
+diff --git a/gcr/gcr/libgcr.map b/gcr/gcr/libgcr.map
+--- a/gcr/gcr/libgcr.map
++++ b/gcr/gcr/libgcr.map
+@@ -3,6 +3,10 @@
+   gcr_*;
+   _gcr_*;
+   SECMEM_*;
++  /* Fil-C pizlonation exports pizlonated_<name> aliases for every exported
++     * function; consumers (gcr-viewer, the g-ir-scanner dumper) reference
++     * those aliases directly; they must not be caught by "local: *". */
++  pizlonated*;
+ local:
+   *;
+ };

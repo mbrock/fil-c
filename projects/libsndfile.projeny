@@ -1,0 +1,20 @@
+Archive: libsndfile-1.2.2.tar.xz
+Origname: libsndfile-1.2.2
+Name: libsndfile
+
+    libsndfile 1.2.2 (read/write sampled sound files) — required by pulseaudio's libpulsecommon (sound-file.c) even for the client-only build; built without external codec libs (no ogg/flac/opus/mpg123 in the chroot → WAV/AIFF/AU support only, which is all pacat/pactl need).
+diff --git a/libsndfile/src/Symbols.gnu-binutils b/libsndfile/src/Symbols.gnu-binutils
+--- a/libsndfile/src/Symbols.gnu-binutils
++++ b/libsndfile/src/Symbols.gnu-binutils
+@@ -43,6 +43,11 @@
+     sf_get_chunk_iterator ;
+     sf_next_chunk_iterator ;
+     sf_current_byterate ;
++  /* Fil-C pizlonation exports pizlonated_<name> aliases for every exported
++     function; consumers (the sndfile-* programs, pacat/pactl, the g-ir dumper)
++     reference those aliases directly and they must not be caught by
++     "local: *". */
++    pizlonated* ;
+   local:
+     * ;
+ } ;

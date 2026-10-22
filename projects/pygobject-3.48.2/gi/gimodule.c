@@ -192,8 +192,55 @@ create_property (const gchar  *prop_name,
 {
     GParamSpec *pspec = NULL;
 
-    switch ((uintptr_t)G_TYPE_FUNDAMENTAL(prop_type)) {
-    case (uintptr_t)G_TYPE_CHAR:
+        /* pizlix/Fil-C: the Fil-C glib represents GType as an int-derived pointer type,
+       so a switch over it does not compile (case labels would not be
+       integer constant expressions).  Map the GType to a small integer
+       with if/else over pointer equality and switch on that instead;
+       the case bodies are upstream's, verbatim. */
+    int gimodule_fund = -1;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_CHAR)
+        gimodule_fund = 0;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_UCHAR)
+        gimodule_fund = 1;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_BOOLEAN)
+        gimodule_fund = 2;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_INT)
+        gimodule_fund = 3;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_UINT)
+        gimodule_fund = 4;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_LONG)
+        gimodule_fund = 5;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_ULONG)
+        gimodule_fund = 6;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_INT64)
+        gimodule_fund = 7;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_UINT64)
+        gimodule_fund = 8;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_ENUM)
+        gimodule_fund = 9;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_FLAGS)
+        gimodule_fund = 10;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_FLOAT)
+        gimodule_fund = 11;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_DOUBLE)
+        gimodule_fund = 12;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_STRING)
+        gimodule_fund = 13;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_PARAM)
+        gimodule_fund = 14;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_BOXED)
+        gimodule_fund = 15;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_POINTER)
+        gimodule_fund = 16;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_OBJECT)
+        gimodule_fund = 17;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_INTERFACE)
+        gimodule_fund = 18;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(prop_type)) == (uintptr_t) G_TYPE_VARIANT)
+        gimodule_fund = 19;
+
+    switch (gimodule_fund) {
+    case 0:{
 	{
 	    gchar minimum, maximum, default_value;
 
@@ -204,7 +251,8 @@ create_property (const gchar  *prop_name,
 				       maximum, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_UCHAR:
+    }
+    case 1:{
 	{
 	    gchar minimum, maximum, default_value;
 
@@ -215,7 +263,8 @@ create_property (const gchar  *prop_name,
 					maximum, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_BOOLEAN:
+    }
+    case 2:{
 	{
 	    gboolean default_value;
 
@@ -225,7 +274,8 @@ create_property (const gchar  *prop_name,
 					  default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_INT:
+    }
+    case 3:{
 	{
 	    gint minimum, maximum, default_value;
 
@@ -236,7 +286,8 @@ create_property (const gchar  *prop_name,
 				      maximum, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_UINT:
+    }
+    case 4:{
 	{
 	    guint minimum, maximum, default_value;
 
@@ -247,7 +298,8 @@ create_property (const gchar  *prop_name,
 				       maximum, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_LONG:
+    }
+    case 5:{
 	{
 	    glong minimum, maximum, default_value;
 
@@ -258,7 +310,8 @@ create_property (const gchar  *prop_name,
 				       maximum, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_ULONG:
+    }
+    case 6:{
 	{
 	    gulong minimum, maximum, default_value;
 
@@ -269,7 +322,8 @@ create_property (const gchar  *prop_name,
 					maximum, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_INT64:
+    }
+    case 7:{
 	{
 	    gint64 minimum, maximum, default_value;
 
@@ -280,7 +334,8 @@ create_property (const gchar  *prop_name,
 					maximum, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_UINT64:
+    }
+    case 8:{
 	{
 	    guint64 minimum, maximum, default_value;
 
@@ -291,7 +346,8 @@ create_property (const gchar  *prop_name,
 					 maximum, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_ENUM:
+    }
+    case 9:{
 	{
 	    gint default_value;
 	    PyObject *pydefault;
@@ -307,7 +363,8 @@ create_property (const gchar  *prop_name,
 				       prop_type, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_FLAGS:
+    }
+    case 10:{
 	{
 	    guint default_value;
 	    PyObject *pydefault;
@@ -323,7 +380,8 @@ create_property (const gchar  *prop_name,
 					prop_type, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_FLOAT:
+    }
+    case 11:{
 	{
 	    gfloat minimum, maximum, default_value;
 
@@ -334,7 +392,8 @@ create_property (const gchar  *prop_name,
 					maximum, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_DOUBLE:
+    }
+    case 12:{
 	{
 	    gdouble minimum, maximum, default_value;
 
@@ -345,7 +404,8 @@ create_property (const gchar  *prop_name,
 					 maximum, default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_STRING:
+    }
+    case 13:{
 	{
 	    const gchar *default_value;
 
@@ -355,17 +415,20 @@ create_property (const gchar  *prop_name,
 					 default_value, flags);
 	}
 	break;
-    case (uintptr_t)G_TYPE_PARAM:
+    }
+    case 14:{
 	if (!PyArg_ParseTuple(args, ""))
 	    return NULL;
 	pspec = g_param_spec_param (prop_name, nick, blurb, prop_type, flags);
 	break;
-    case (uintptr_t)G_TYPE_BOXED:
+    }
+    case 15:{
 	if (!PyArg_ParseTuple(args, ""))
 	    return NULL;
 	pspec = g_param_spec_boxed (prop_name, nick, blurb, prop_type, flags);
 	break;
-    case (uintptr_t)G_TYPE_POINTER:
+    }
+    case 16:{
 	if (!PyArg_ParseTuple(args, ""))
 	    return NULL;
 	if (prop_type == G_TYPE_GTYPE)
@@ -373,13 +436,16 @@ create_property (const gchar  *prop_name,
 	else
 	    pspec = g_param_spec_pointer (prop_name, nick, blurb, flags);
 	break;
-    case (uintptr_t)G_TYPE_OBJECT:
-    case (uintptr_t)G_TYPE_INTERFACE:
+    }
+    case 17:{
+    }
+    case 18:{
 	if (!PyArg_ParseTuple(args, ""))
 	    return NULL;
 	pspec = g_param_spec_object (prop_name, nick, blurb, prop_type, flags);
 	break;
-    case (uintptr_t)G_TYPE_VARIANT:
+    }
+    case 19:{
 	{
 	    PyObject *pydefault;
             GVariant *default_value = NULL;
@@ -391,10 +457,13 @@ create_property (const gchar  *prop_name,
 	    pspec = g_param_spec_variant (prop_name, nick, blurb, G_VARIANT_TYPE_ANY, default_value, flags);
 	}
 	break;
-    default:
+    }
+    default:{
 	/* unhandled pspec type ... */
 	break;
     }
+    }
+
 
     if (!pspec) {
 	char buf[128];

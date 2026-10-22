@@ -326,8 +326,55 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
 {
     GType value_type = G_VALUE_TYPE(value);
 
-    switch ((uintptr_t)G_TYPE_FUNDAMENTAL(value_type)) {
-    case (uintptr_t)G_TYPE_INTERFACE:
+        /* pizlix/Fil-C: the Fil-C glib represents GType as an int-derived pointer type,
+       so a switch over it does not compile (case labels would not be
+       integer constant expressions).  Map the GType to a small integer
+       with if/else over pointer equality and switch on that instead;
+       the case bodies are upstream's, verbatim. */
+    int value_fund = -1;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_INTERFACE)
+        value_fund = 0;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_CHAR)
+        value_fund = 1;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_UCHAR)
+        value_fund = 2;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_BOOLEAN)
+        value_fund = 3;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_INT)
+        value_fund = 4;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_UINT)
+        value_fund = 5;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_LONG)
+        value_fund = 6;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_ULONG)
+        value_fund = 7;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_INT64)
+        value_fund = 8;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_UINT64)
+        value_fund = 9;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_ENUM)
+        value_fund = 10;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_FLAGS)
+        value_fund = 11;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_FLOAT)
+        value_fund = 12;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_DOUBLE)
+        value_fund = 13;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_STRING)
+        value_fund = 14;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_POINTER)
+        value_fund = 15;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_BOXED)
+        value_fund = 16;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_PARAM)
+        value_fund = 17;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_OBJECT)
+        value_fund = 18;
+    if ((uintptr_t) (G_TYPE_FUNDAMENTAL(value_type)) == (uintptr_t) G_TYPE_VARIANT)
+        value_fund = 19;
+
+    switch (value_fund) {
+    case 0:{
         /* we only handle interface types that have a GObject prereq */
         if (g_type_is_a(value_type, G_TYPE_OBJECT)) {
             if (obj == Py_None)
@@ -349,7 +396,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
             return -1;
         }
         break;
-    case (uintptr_t)G_TYPE_CHAR:
+    }
+    case 1:{
     {
         gint8 temp;
         if (pygi_gschar_from_py (obj, &temp)) {
@@ -358,7 +406,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_UCHAR:
+    }
+    case 2:{
     {
         guchar temp;
         if (pygi_guchar_from_py (obj, &temp)) {
@@ -367,7 +416,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_BOOLEAN:
+    }
+    case 3:{
     {
         gboolean temp;
         if (pygi_gboolean_from_py (obj, &temp)) {
@@ -376,7 +426,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_INT:
+    }
+    case 4:{
     {
         gint temp;
         if (pygi_gint_from_py (obj, &temp)) {
@@ -385,7 +436,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_UINT:
+    }
+    case 5:{
     {
         guint temp;
         if (pygi_guint_from_py (obj, &temp)) {
@@ -394,7 +446,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_LONG:
+    }
+    case 6:{
     {
         glong temp;
         if (pygi_glong_from_py (obj, &temp)) {
@@ -403,7 +456,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_ULONG:
+    }
+    case 7:{
     {
         gulong temp;
         if (pygi_gulong_from_py (obj, &temp)) {
@@ -412,7 +466,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_INT64:
+    }
+    case 8:{
     {
         gint64 temp;
         if (pygi_gint64_from_py (obj, &temp)) {
@@ -421,7 +476,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_UINT64:
+    }
+    case 9:{
     {
         guint64 temp;
         if (pygi_guint64_from_py (obj, &temp)) {
@@ -430,7 +486,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_ENUM:
+    }
+    case 10:{
     {
         gint val = 0;
         if (pyg_enum_get_value(G_VALUE_TYPE(value), obj, &val) < 0) {
@@ -439,7 +496,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         g_value_set_enum(value, val);
     }
     break;
-    case (uintptr_t)G_TYPE_FLAGS:
+    }
+    case 11:{
     {
         guint val = 0;
         if (pyg_flags_get_value(G_VALUE_TYPE(value), obj, &val) < 0) {
@@ -449,7 +507,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         return 0;
     }
     break;
-    case (uintptr_t)G_TYPE_FLOAT:
+    }
+    case 12:{
     {
         gfloat temp;
         if (pygi_gfloat_from_py (obj, &temp)) {
@@ -458,7 +517,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_DOUBLE:
+    }
+    case 13:{
     {
         gdouble temp;
         if (pygi_gdouble_from_py (obj, &temp)) {
@@ -467,7 +527,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         } else
             return -1;
     }
-    case (uintptr_t)G_TYPE_STRING:
+    }
+    case 14:{
     {
         gchar *temp;
         if (pygi_utf8_from_py (obj, &temp)) {
@@ -489,7 +550,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
             return -1;
         }
     }
-    case (uintptr_t)G_TYPE_POINTER:
+    }
+    case 15:{
         if (obj == Py_None)
             g_value_set_pointer(value, NULL);
         else if (PyObject_TypeCheck(obj, &PyGPointer_Type) &&
@@ -504,7 +566,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
             return -1;
         }
         break;
-    case (uintptr_t)G_TYPE_BOXED: {
+    }
+    case 16:{ {
         PyGTypeMarshal *bm;
         gboolean holds_value_array;
 
@@ -561,7 +624,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         }
         break;
     }
-    case (uintptr_t)G_TYPE_PARAM:
+    }
+    case 17:{
         /* we need to support both the wrapped _gi.GParamSpec and the GI
          * GObject.ParamSpec */
         if (G_IS_PARAM_SPEC (pygobject_get (obj)))
@@ -573,7 +637,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
             return -1;
         }
         break;
-    case (uintptr_t)G_TYPE_OBJECT:
+    }
+    case 18:{
         if (obj == Py_None) {
             g_value_set_object(value, NULL);
         } else if (PyObject_TypeCheck(obj, &PyGObject_Type) &&
@@ -585,7 +650,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
             return -1;
         }
         break;
-    case (uintptr_t)G_TYPE_VARIANT:
+    }
+    case 19:{
     {
         if (obj == Py_None)
             g_value_set_variant(value, NULL);
@@ -597,7 +663,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         }
         break;
     }
-    default:
+    }
+    default:{
     {
         PyGTypeMarshal *bm;
         if ((bm = pyg_type_lookup(G_VALUE_TYPE(value))) != NULL) {
@@ -636,6 +703,8 @@ pyg_value_from_pyobject_with_error(GValue *value, PyObject *obj)
         break;
     }
     }
+    }
+
 
     /* If an error occurred, unset the GValue but don't clear the Python error. */
     if (PyErr_Occurred()) {
@@ -683,41 +752,92 @@ PyObject *
 pygi_value_to_py_basic_type (const GValue *value, GType fundamental, gboolean *handled)
 {
     *handled = TRUE;
-    switch ((uintptr_t)fundamental) {
-        case (uintptr_t)G_TYPE_CHAR:
+        /* pizlix/Fil-C: the Fil-C glib represents GType as an int-derived pointer type,
+       so a switch over it does not compile (case labels would not be
+       integer constant expressions).  Map the GType to a small integer
+       with if/else over pointer equality and switch on that instead;
+       the case bodies are upstream's, verbatim. */
+    int basic_fund = -1;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_CHAR)
+        basic_fund = 0;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_UCHAR)
+        basic_fund = 1;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_BOOLEAN)
+        basic_fund = 2;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_INT)
+        basic_fund = 3;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_UINT)
+        basic_fund = 4;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_LONG)
+        basic_fund = 5;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_ULONG)
+        basic_fund = 6;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_INT64)
+        basic_fund = 7;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_UINT64)
+        basic_fund = 8;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_ENUM)
+        basic_fund = 9;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_FLAGS)
+        basic_fund = 10;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_FLOAT)
+        basic_fund = 11;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_DOUBLE)
+        basic_fund = 12;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_STRING)
+        basic_fund = 13;
+
+    switch (basic_fund) {
+    case 0:{
             return PyLong_FromLong (g_value_get_schar (value));
-        case (uintptr_t)G_TYPE_UCHAR:
+        }
+    case 1:{
             return PyLong_FromLong (g_value_get_uchar (value));
-        case (uintptr_t)G_TYPE_BOOLEAN:
+        }
+    case 2:{
             return pygi_gboolean_to_py (g_value_get_boolean (value));
-        case (uintptr_t)G_TYPE_INT:
+        }
+    case 3:{
             return pygi_gint_to_py (g_value_get_int (value));
-        case (uintptr_t)G_TYPE_UINT:
+        }
+    case 4:{
             return pygi_guint_to_py (g_value_get_uint (value));
-        case (uintptr_t)G_TYPE_LONG:
+        }
+    case 5:{
             return pygi_glong_to_py (g_value_get_long(value));
-        case (uintptr_t)G_TYPE_ULONG:
+        }
+    case 6:{
             return pygi_gulong_to_py (g_value_get_ulong (value));
-        case (uintptr_t)G_TYPE_INT64:
+        }
+    case 7:{
             return pygi_gint64_to_py (g_value_get_int64 (value));
-        case (uintptr_t)G_TYPE_UINT64:
+        }
+    case 8:{
             return pygi_guint64_to_py (g_value_get_uint64 (value));
-        case (uintptr_t)G_TYPE_ENUM:
+        }
+    case 9:{
             return pyg_enum_from_gtype (G_VALUE_TYPE (value),
                                         g_value_get_enum (value));
-        case (uintptr_t)G_TYPE_FLAGS:
+        }
+    case 10:{
             return pyg_flags_from_gtype (G_VALUE_TYPE (value),
                                          g_value_get_flags (value));
-        case (uintptr_t)G_TYPE_FLOAT:
+        }
+    case 11:{
             return pygi_gfloat_to_py (g_value_get_float (value));
-        case (uintptr_t)G_TYPE_DOUBLE:
+        }
+    case 12:{
             return pygi_gdouble_to_py (g_value_get_double (value));
-        case (uintptr_t)G_TYPE_STRING:
+        }
+    case 13:{
             return pygi_utf8_to_py (g_value_get_string (value));
-        default:
+        }
+    default:{
             *handled = FALSE;
             return NULL;
     }
+    }
+
 }
 
 /**
@@ -735,20 +855,43 @@ value_to_py_structured_type (const GValue *value, GType fundamental, gboolean co
 {
     const gchar *type_name;
 
-    switch ((uintptr_t)fundamental) {
-    case (uintptr_t)G_TYPE_INTERFACE:
+        /* pizlix/Fil-C: the Fil-C glib represents GType as an int-derived pointer type,
+       so a switch over it does not compile (case labels would not be
+       integer constant expressions).  Map the GType to a small integer
+       with if/else over pointer equality and switch on that instead;
+       the case bodies are upstream's, verbatim. */
+    int struct_fund = -1;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_INTERFACE)
+        struct_fund = 0;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_POINTER)
+        struct_fund = 1;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_BOXED)
+        struct_fund = 2;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_PARAM)
+        struct_fund = 3;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_OBJECT)
+        struct_fund = 4;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_VARIANT)
+        struct_fund = 5;
+    if ((uintptr_t) (fundamental) == (uintptr_t) G_TYPE_INVALID)
+        struct_fund = 6;
+
+    switch (struct_fund) {
+    case 0:{
         if (g_type_is_a(G_VALUE_TYPE(value), G_TYPE_OBJECT))
             return pygobject_new(g_value_get_object(value));
         else
             break;
 
-    case (uintptr_t)G_TYPE_POINTER:
+    }
+    case 1:{
         if (G_VALUE_HOLDS_GTYPE (value))
             return pyg_type_wrapper_new (g_value_get_gtype (value));
         else
             return pyg_pointer_new(G_VALUE_TYPE(value),
                     g_value_get_pointer(value));
-    case (uintptr_t)G_TYPE_BOXED: {
+    }
+    case 2:{ {
         PyGTypeMarshal *bm;
         gboolean holds_value_array;
 
@@ -792,11 +935,14 @@ value_to_py_structured_type (const GValue *value, GType fundamental, gboolean co
                         g_value_get_boxed(value),FALSE,FALSE);
         }
     }
-    case (uintptr_t)G_TYPE_PARAM:
+    }
+    case 3:{
         return pyg_param_spec_new(g_value_get_param(value));
-    case (uintptr_t)G_TYPE_OBJECT:
+    }
+    case 4:{
         return pygobject_new(g_value_get_object(value));
-    case (uintptr_t)G_TYPE_VARIANT:
+    }
+    case 5:{
     {
         GVariant *v = g_value_get_variant(value);
         if (v == NULL) {
@@ -805,10 +951,12 @@ value_to_py_structured_type (const GValue *value, GType fundamental, gboolean co
         }
         return pygi_struct_new_from_g_type (G_TYPE_VARIANT, g_variant_ref(v), FALSE);
     }
-    case (uintptr_t)G_TYPE_INVALID:
+    }
+    case 6:{
         PyErr_SetString (PyExc_TypeError, "Invalid type");
         return NULL;
-    default:
+    }
+    default:{
     {
         PyGTypeMarshal *bm;
         GIRepository *repository;
@@ -835,6 +983,8 @@ value_to_py_structured_type (const GValue *value, GType fundamental, gboolean co
         break;
     }
     }
+    }
+
 
     type_name = g_type_name (G_VALUE_TYPE (value));
     if (type_name == NULL) {

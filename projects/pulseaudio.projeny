@@ -3,3 +3,82 @@ Origname: pulseaudio-17.0
 Name: pulseaudio
 
     PulseAudio 17.0. For gnome-shell we only build the client libraries (libpulse/libpulse-mainloop-glib + headers): configure with -Ddaemon=false so the server side (which would need a much bigger port) is skipped. gnome-shell's gvc (libgvc) subproject links against libpulse only.
+diff --git a/pulseaudio/src/pulse/map-file b/pulseaudio/src/pulse/map-file
+--- a/pulseaudio/src/pulse/map-file
++++ b/pulseaudio/src/pulse/map-file
+@@ -388,6 +388,11 @@
+ pa_xrealloc;
+ pa_xstrdup;
+ pa_xstrndup;
++  /* Fil-C pizlonation exports pizlonated_<name> aliases for every exported
++   * function; consumers (gnome-shell's vendored gvc, pavucontrol-style
++   * clients, the g-ir dumper) reference those aliases directly and they must
++   * not be caught by "local: *". */
++  pizlonated*;
+ local:
+ *;
+ };
+diff --git a/pulseaudio/src/pulsecore/atomic.h b/pulseaudio/src/pulsecore/atomic.h
+--- a/pulseaudio/src/pulsecore/atomic.h
++++ b/pulseaudio/src/pulsecore/atomic.h
+@@ -103,7 +103,35 @@
+     return __sync_bool_compare_and_swap(&a->value, old_i, new_i);
+ }
+
++/* Fil-C: keep the atomic slot a real pointer, not a uintptr_t.  Upstream
++ * round-trips pointers through an integer slot, which under Fil-C strips the
++ * pointer's object metadata; loading such a value back into a pa_mutex* (via
++ * pa_static_mutex_get) and dereferencing it panics ("cannot read pointer with
++ * null object" in pa_mutex_unlock).  A void* slot with the same __atomic/
++ * __sync builtins keeps the metadata; the struct stays 8 bytes / same
++ * alignment, so all the embedded uses (pa_static_mutex, pa_flist, asyncq
++ * cells, pa_memblock data, semaphores) are layout-identical. */
++#if defined(__FILC__)
+ typedef struct pa_atomic_ptr {
++    void *volatile value;
++} pa_atomic_ptr_t;
++
++#define PA_ATOMIC_PTR_INIT(v) { .value = (v) }
++
++static inline void* pa_atomic_ptr_load(const pa_atomic_ptr_t *a) {
++    return __atomic_load_n(&a->value, __ATOMIC_SEQ_CST);
++}
++
++static inline void pa_atomic_ptr_store(pa_atomic_ptr_t *a, void* p) {
++    __atomic_store_n(&a->value, p, __ATOMIC_SEQ_CST);
++}
++
++static inline bool pa_atomic_ptr_cmpxchg(pa_atomic_ptr_t *a, void *old_p, void* new_p) {
++    return __sync_bool_compare_and_swap(&a->value, old_p, new_p);
++}
++#else /* !__FILC__ */
++
++typedef struct pa_atomic_ptr {
+     volatile uintptr_t value;
+ } pa_atomic_ptr_t;
+
+@@ -138,6 +166,7 @@
+ static inline bool pa_atomic_ptr_cmpxchg(pa_atomic_ptr_t *a, void *old_p, void* new_p) {
+     return __sync_bool_compare_and_swap(&a->value, (uintptr_t) old_p, (uintptr_t) new_p);
+ }
++#endif /* !__FILC__ */
+
+ #elif defined(__NetBSD__) && defined(HAVE_SYS_ATOMIC_H)
+
+diff --git a/pulseaudio/src/pulsecore/macro.h b/pulseaudio/src/pulsecore/macro.h
+--- a/pulseaudio/src/pulsecore/macro.h
++++ b/pulseaudio/src/pulsecore/macro.h
+@@ -224,7 +224,12 @@
+ #define PA_PATH_SEP_CHAR '/'
+ #endif
+
+-#if defined(__GNUC__) && defined(__ELF__)
++/* Fil-C: the .gnu.warning.* module-level asm is not something the Fil-C
++ * pizlonator can parse (its module-asm tokenizer knows only the .globl-style
++ * aliases it emits itself) and cc aborts with "Error parsing module asm".
++ * The sections only make ld print a deprecation warning when the symbol is
++ * referenced, so drop them under Fil-C. */
++#if defined(__GNUC__) && defined(__ELF__) && !defined(__FILC__)
+
+ #define PA_WARN_REFERENCE(sym, msg)                  \
+     __asm__(".section .gnu.warning." #sym);          \

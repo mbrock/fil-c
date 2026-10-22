@@ -3,3 +3,26 @@ Origname: upower-v1.90.9
 Name: upower
 
     upower 1.90.9 (power/battery status D-Bus service; gnome-shell's system status menus use its org.freedesktop.UPower API). freedesktop.org only hosts up to 0.99.x; the Debian pool orig tarball (root dir upower-v1.90.9) is the canonical tarball.
+diff --git a/upower/meson.build b/upower/meson.build
+--- a/upower/meson.build
++++ b/upower/meson.build
+@@ -31,12 +31,18 @@
+ cdata.set_quoted('PACKAGE_SYSCONF_DIR', get_option('sysconfdir'))
+
+ glib_min_version = '2.66'
++# pizlix/Fil-C: with GLIB_VERSION_MAX_ALLOWED < 2.80 the glib headers expand
++# G_DEFINE_TYPE with the gsize-based g_once_init_enter/leave pair, which does
++# not compile against the Fil-C glib (GType is a pointer type there).  Bump
++# the *allowed* ceiling to 2.80 so the macros use the _pointer variants
++# (GLIB_VERSION_MIN_REQUIRED stays at 2.66 for deprecation warnings).
++glib_max_version_def = 'GLIB_VERSION_2_80'
+
+ glib_version_def = 'GLIB_VERSION_@0@_@1@'.format(
+     glib_min_version.split('.')[0], glib_min_version.split('.')[1])
+ common_cflags = cc.get_supported_arguments([
+     '-DGLIB_VERSION_MIN_REQUIRED=' + glib_version_def,
+-    '-DGLIB_VERSION_MAX_ALLOWED=' + glib_version_def,
++    '-DGLIB_VERSION_MAX_ALLOWED=' + glib_max_version_def,
+ ])
+ add_project_arguments(common_cflags, language: 'c')
+

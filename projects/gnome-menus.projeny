@@ -4,3 +4,90 @@ Origname: gnome-menus-3.36.0
 Name: gnome-menus
 
     gnome-menus 3.36.0 (freedesktop.org .menu file parsing, libgnome-menu-3). Created as groundwork; gnome-shell 46's meson does not hard-require it, but the shell's app-grid code falls back to it and having it installed is harmless.
+diff --git a/gnome-menus/configure b/gnome-menus/configure
+--- a/gnome-menus/configure
++++ b/gnome-menus/configure
+@@ -9433,7 +9433,7 @@
+ symcode='[BCDEGRST]'
+
+ # Regexp to match symbols that can be accessed directly from C.
+-sympat='\([_A-Za-z][_A-Za-z0-9]*\)'
++sympat='\(pizlonated_[_A-Za-z][_A-Za-z0-9]*\)'
+
+ # Define system-specific variables.
+ case $host_os in
+@@ -9499,14 +9499,14 @@
+ # so use this general approach.
+ lt_cv_sys_global_symbol_to_cdecl="sed -n"\
+ $lt_cdecl_hook\
+-" -e 's/^T .* \(.*\)$/extern int \1();/p'"\
+-" -e 's/^$symcode$symcode* .* \(.*\)$/extern char \1;/p'"
++" -e 's/^T .* pizlonated_\(.*\)$/extern int \1();/p'"\
++" -e 's/^$symcode$symcode* .* pizlonated_\(.*\)$/extern char \1;/p'"
+
+ # Transform an extracted symbol line into symbol name and symbol address
+ lt_cv_sys_global_symbol_to_c_name_address="sed -n"\
+ $lt_c_name_hook\
+ " -e 's/^: \(.*\) .*$/  {\"\1\", (void *) 0},/p'"\
+-" -e 's/^$symcode$symcode* .* \(.*\)$/  {\"\1\", (void *) \&\1},/p'"
++" -e 's/^$symcode$symcode* .* pizlonated_\(.*\)$/  {\"\1\", (void *) \&\1},/p'"
+
+ # Transform an extracted symbol line into symbol name with lib prefix and
+ # symbol address.
+@@ -9514,7 +9514,7 @@
+ $lt_c_name_lib_hook\
+ " -e 's/^: \(.*\) .*$/  {\"\1\", (void *) 0},/p'"\
+ " -e 's/^$symcode$symcode* .* \(lib.*\)$/  {\"\1\", (void *) \&\1},/p'"\
+-" -e 's/^$symcode$symcode* .* \(.*\)$/  {\"lib\1\", (void *) \&\1},/p'"
++" -e 's/^$symcode$symcode* .* pizlonated_\(.*\)$/  {\"lib\1\", (void *) \&\1},/p'"
+
+ # Handle CRLF in mingw tool chain
+ opt_cr=
+@@ -9593,8 +9593,8 @@
+       fi
+
+       # Make sure that we snagged all the symbols we need.
+-      if $GREP ' nm_test_var$' "$nlist" >/dev/null; then
+-	if $GREP ' nm_test_func$' "$nlist" >/dev/null; then
++      if $GREP ' pizlonated_nm_test_var$' "$nlist" >/dev/null; then
++	if $GREP ' pizlonated_nm_test_func$' "$nlist" >/dev/null; then
+ 	  cat <<_LT_EOF > conftest.$ac_ext
+ /* Keep this code in sync between libtool.m4, ltmain, lt_system.h, and tests.  */
+ #if defined _WIN32 || defined __CYGWIN__ || defined _WIN32_WCE
+@@ -9627,7 +9627,7 @@
+ {
+   { "@PROGRAM@", (void *) 0 },
+ _LT_EOF
+-	  $SED "s/^$symcode$symcode* .* \(.*\)$/  {\"\1\", (void *) \&\1},/" < "$nlist" | $GREP -v main >> conftest.$ac_ext
++	  $SED "s/^$symcode$symcode* .* pizlonated_\(.*\)$/  {\"\1\", (void *) \&\1},/" < "$nlist" | $GREP -v main >> conftest.$ac_ext
+ 	  cat <<\_LT_EOF >> conftest.$ac_ext
+   {0, (void *) 0}
+ };
+diff --git a/gnome-menus/libmenu/desktop-entries.c b/gnome-menus/libmenu/desktop-entries.c
+--- a/gnome-menus/libmenu/desktop-entries.c
++++ b/gnome-menus/libmenu/desktop-entries.c
+@@ -88,9 +88,14 @@
+ static const gchar * const *
+ get_current_desktops (void)
+ {
++  /* pizlix/Fil-C: the location must have pointer type and the value must be
++   * stored with the _pointer variants of g_once_init_enter/leave, so the
++   * string array keeps its pointer object metadata (the plain variants
++   * round-trip it through gsize, and consumers would then crash dereferencing
++   * a capability-less pointer). */
+   static gchar **result;
+
+-  if (g_once_init_enter (&result))
++  if (g_once_init_enter_pointer (&result))
+     {
+       const gchar *desktops;
+       gchar **tmp;
+@@ -102,7 +107,7 @@
+
+       tmp = g_strsplit (desktops, ":", 0);
+
+-      g_once_init_leave (&result, tmp);
++      g_once_init_leave_pointer (&result, tmp); /* pizlix/Fil-C: see above. */
+     }
+
+   return  (const gchar **) result;

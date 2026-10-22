@@ -560,7 +560,15 @@ pygobject_register_class(PyObject *dict, const gchar *type_name,
     } else
         bases = runtime_bases;
 
-    Py_SET_TYPE(type, PyGObject_MetaType);
+    /* pizlix/Fil-C: PyGObject_MetaType is still NULL while the _gi module is
+     * being executed (it is installed later, from Python, via
+     * gi/types.py's _gi._install_metaclass(_GObjectMetaBase)).  The
+     * pizlonated CPython asserts zhasvalidcap() in Py_SET_TYPE, so a NULL
+     * metatype must not be stored; leaving ob_type alone here matches the
+     * upstream effect, since PyType_Ready() fixes ob_type up from the base
+     * type's metatype anyway. */
+    if (PyGObject_MetaType != NULL)
+        Py_SET_TYPE(type, PyGObject_MetaType);
     type->tp_bases = bases;
     if (G_LIKELY(bases)) {
         type->tp_base = (PyTypeObject *)PyTuple_GetItem(bases, 0);

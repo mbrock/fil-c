@@ -1,6 +1,287 @@
 URL: http://archive.ubuntu.com/ubuntu/pool/main/p/policykit-1/policykit-1_126.orig.tar.gz 822b19a17845611876d3624a0cbe9c6231d23e7316d86e383c5694faa544b19f
 URL: http://deb.debian.org/debian/pool/main/p/policykit-1/policykit-1_126.orig.tar.gz 822b19a17845611876d3624a0cbe9c6231d23e7316d86e383c5694faa544b19f
 Origname: polkit-126
-Name: polkit-126
+Name: polkit
 
     polkit 126 (PolicyKit authorization manager). Ubuntu/Debian orig tarball (identical bytes in both pools; upstream's own release pages 404 and the GitHub release carries no tarball assets). Uses its bundled duktape JS engine, so no mozjs dependency.
+diff --git a/polkit/meson.build b/polkit/meson.build
+--- a/polkit/meson.build
++++ b/polkit/meson.build
+@@ -206,6 +206,12 @@
+   config_data.set10('HAVE_' + func.to_upper(), cc.has_function(func, dependencies: logind_dep))
+ endif
+ config_data.set('HAVE_LIBSYSTEMD', enable_logind)
++# pizlix/Fil-C: elogind provides the same sd_* API through <elogind/sd-*.h>;
++# upstream's guards conflate "session tracking via sd-login" with "built
++# against systemd", which breaks the elogind build (no systemd headers).
++if session_tracking == 'elogind'
++  config_data.set('HAVE_LIBELOGIND', true)
++endif
+
+ config_data.set('HAVE_PIDFD_OPEN', cc.get_define('SYS_pidfd_open', prefix: '#include <sys/syscall.h>') != '')
+
+diff --git a/polkit/src/polkit/polkitenumtypes.c.template b/polkit/src/polkit/polkitenumtypes.c.template
+--- a/polkit/src/polkit/polkitenumtypes.c.template
++++ b/polkit/src/polkit/polkitenumtypes.c.template
+@@ -11,9 +11,13 @@
+ GType
+ @enum_name@_get_type (void)
+ {
+-  static volatile gsize g_define_type_id__volatile = 0;
++  /* Fil-C: the location must have pointer type and the value must be stored
++   * with the _pointer variants of g_once_init_enter/leave, so that the GType
++   * keeps its pointer representation (the plain variants round-trip the
++   * value through gsize). */
++  static gpointer g_define_type_id__volatile = 0;
+
+-  if (g_once_init_enter ((gsize*) &g_define_type_id__volatile))
++  if (g_once_init_enter_pointer (&g_define_type_id__volatile))
+     {
+       static const G@Type@Value values[] = {
+ /*** END value-header ***/
+@@ -27,7 +31,8 @@
+       };
+       GType g_define_type_id =
+         g_@type@_register_static (g_intern_static_string ("@EnumName@"), values);
+-      g_once_init_leave (&g_define_type_id__volatile, g_define_type_id);
++      /* Fil-C: see above. */
++      g_once_init_leave_pointer (&g_define_type_id__volatile, g_define_type_id);
+     }
+
+   return g_define_type_id__volatile;
+diff --git a/polkit/src/polkit/polkitidentity.c b/polkit/src/polkit/polkitidentity.c
+--- a/polkit/src/polkit/polkitidentity.c
++++ b/polkit/src/polkit/polkitidentity.c
+@@ -45,9 +45,13 @@
+ GType
+ polkit_identity_get_type (void)
+ {
+-  static volatile gsize g_define_type_id__volatile = 0;
++  /* Fil-C: the location must have pointer type and the value must be
++   * stored with the _pointer variants of g_once_init_enter/leave, so that
++   * the GType keeps its pointer representation (the plain variants
++   * round-trip the value through gsize). */
++  static gpointer g_define_type_id__volatile = 0;
+
+-  if (g_once_init_enter ((gsize*) &g_define_type_id__volatile))
++  if (g_once_init_enter_pointer (&g_define_type_id__volatile))
+     {
+       static const GTypeInfo info =
+       {
+@@ -67,7 +71,7 @@
+         g_type_register_static (G_TYPE_INTERFACE, "PolkitIdentity", &info, 0);
+
+       g_type_interface_add_prerequisite (iface_type, G_TYPE_OBJECT);
+-      g_once_init_leave (&g_define_type_id__volatile, iface_type);
++      g_once_init_leave_pointer (&g_define_type_id__volatile, iface_type);
+     }
+
+   return g_define_type_id__volatile;
+diff --git a/polkit/src/polkit/polkitpermission.c b/polkit/src/polkit/polkitpermission.c
+--- a/polkit/src/polkit/polkitpermission.c
++++ b/polkit/src/polkit/polkitpermission.c
+@@ -20,8 +20,10 @@
+  *         David Zeuthen <davidz@redhat.com>
+  */
+
+-#ifdef HAVE_LIBSYSTEMD
++#if defined(HAVE_LIBSYSTEMD) && !defined(HAVE_LIBELOGIND)
+ #  include <systemd/sd-login.h>
++#elif defined(HAVE_LIBELOGIND)
++#  include <elogind/sd-login.h>
+ #endif
+
+ #include <sys/types.h>
+@@ -493,7 +495,7 @@
+
+ static char *get_session_state(void)
+ {
+-#ifdef HAVE_LIBSYSTEMD
++#if defined(HAVE_LIBSYSTEMD) || defined(HAVE_LIBELOGIND)
+   char *session = NULL;
+   char *state = NULL;
+   uid_t uid;
+@@ -542,7 +544,7 @@
+ static void on_sessions_changed (PolkitAuthority *authority,
+                       gpointer         user_data)
+ {
+-#ifdef HAVE_LIBSYSTEMD
++#if defined(HAVE_LIBSYSTEMD) || defined(HAVE_LIBELOGIND)
+   char *new_session_state = NULL;
+   char *last_state = NULL;
+
+diff --git a/polkit/src/polkit/polkitsubject.c b/polkit/src/polkit/polkitsubject.c
+--- a/polkit/src/polkit/polkitsubject.c
++++ b/polkit/src/polkit/polkitsubject.c
+@@ -46,9 +46,13 @@
+ GType
+ polkit_subject_get_type (void)
+ {
+-  static volatile gsize g_define_type_id__volatile = 0;
++  /* Fil-C: the location must have pointer type and the value must be
++   * stored with the _pointer variants of g_once_init_enter/leave, so that
++   * the GType keeps its pointer representation (the plain variants
++   * round-trip the value through gsize). */
++  static gpointer g_define_type_id__volatile = 0;
+
+-  if (g_once_init_enter ((gsize*) &g_define_type_id__volatile))
++  if (g_once_init_enter_pointer (&g_define_type_id__volatile))
+     {
+       static const GTypeInfo info =
+       {
+@@ -68,7 +72,7 @@
+         g_type_register_static (G_TYPE_INTERFACE, "PolkitSubject", &info, 0);
+
+       g_type_interface_add_prerequisite (iface_type, G_TYPE_OBJECT);
+-      g_once_init_leave (&g_define_type_id__volatile, iface_type);
++      g_once_init_leave_pointer (&g_define_type_id__volatile, iface_type);
+     }
+
+   return g_define_type_id__volatile;
+diff --git a/polkit/src/polkitagent/polkitagentenumtypes.c.template b/polkit/src/polkitagent/polkitagentenumtypes.c.template
+--- a/polkit/src/polkitagent/polkitagentenumtypes.c.template
++++ b/polkit/src/polkitagent/polkitagentenumtypes.c.template
+@@ -11,9 +11,13 @@
+ GType
+ @enum_name@_get_type (void)
+ {
+-  static volatile gsize g_define_type_id__volatile = 0;
++  /* Fil-C: the location must have pointer type and the value must be
++   * stored with the _pointer variants of g_once_init_enter/leave, so that
++   * the GType keeps its pointer representation (the plain variants
++   * round-trip the value through gsize). */
++  static gpointer g_define_type_id__volatile = 0;
+
+-  if (g_once_init_enter ((gsize*) &g_define_type_id__volatile))
++  if (g_once_init_enter_pointer (&g_define_type_id__volatile))
+     {
+       static const G@Type@Value values[] = {
+ /*** END value-header ***/
+@@ -27,7 +31,7 @@
+       };
+       GType g_define_type_id =
+         g_@type@_register_static (g_intern_static_string ("@EnumName@"), values);
+-      g_once_init_leave (&g_define_type_id__volatile, g_define_type_id);
++      g_once_init_leave_pointer (&g_define_type_id__volatile, g_define_type_id);
+     }
+
+   return g_define_type_id__volatile;
+diff --git a/polkit/src/polkitbackend/polkitbackendactionlookup.c b/polkit/src/polkitbackend/polkitbackendactionlookup.c
+--- a/polkit/src/polkitbackend/polkitbackendactionlookup.c
++++ b/polkit/src/polkitbackend/polkitbackendactionlookup.c
+@@ -73,9 +73,13 @@
+ GType
+ polkit_backend_action_lookup_get_type (void)
+ {
+-  static volatile gsize g_define_type_id__volatile = 0;
++  /* Fil-C: the location must have pointer type and the value must be
++   * stored with the _pointer variants of g_once_init_enter/leave, so that
++   * the GType keeps its pointer representation (the plain variants
++   * round-trip the value through gsize). */
++  static gpointer g_define_type_id__volatile = 0;
+
+-  if (g_once_init_enter ((gsize*) &g_define_type_id__volatile))
++  if (g_once_init_enter_pointer (&g_define_type_id__volatile))
+     {
+       static const GTypeInfo info =
+       {
+@@ -95,7 +99,7 @@
+         g_type_register_static (G_TYPE_INTERFACE, "PolkitBackendActionLookup", &info, 0);
+
+       g_type_interface_add_prerequisite (iface_type, G_TYPE_OBJECT);
+-      g_once_init_leave (&g_define_type_id__volatile, iface_type);
++      g_once_init_leave_pointer (&g_define_type_id__volatile, iface_type);
+     }
+
+   return g_define_type_id__volatile;
+diff --git a/polkit/src/polkitbackend/polkitbackendcommon.h b/polkit/src/polkitbackend/polkitbackendcommon.h
+--- a/polkit/src/polkitbackend/polkitbackendcommon.h
++++ b/polkit/src/polkitbackend/polkitbackendcommon.h
+@@ -46,8 +46,10 @@
+
+ #include <polkit/polkitprivate.h>
+
+-#ifdef HAVE_LIBSYSTEMD
++#if defined(HAVE_LIBSYSTEMD) && !defined(HAVE_LIBELOGIND)
+ #include <systemd/sd-login.h>
++#elif defined(HAVE_LIBELOGIND)
++#include <elogind/sd-login.h>
+ #endif /* HAVE_LIBSYSTEMD */
+
+ #define RUNAWAY_KILLER_TIMEOUT (15)
+diff --git a/polkit/src/polkitbackend/polkitbackendduktapeauthority.c b/polkit/src/polkitbackend/polkitbackendduktapeauthority.c
+--- a/polkit/src/polkitbackend/polkitbackendduktapeauthority.c
++++ b/polkit/src/polkitbackend/polkitbackendduktapeauthority.c
+@@ -412,7 +412,7 @@
+   pid_early = polkit_unix_process_get_pid (POLKIT_UNIX_PROCESS (process));
+   pidfd = polkit_unix_process_get_pidfd (POLKIT_UNIX_PROCESS (process));
+
+-#ifdef HAVE_LIBSYSTEMD
++#if defined(HAVE_LIBSYSTEMD) || defined(HAVE_LIBELOGIND)
+ #if HAVE_SD_PIDFD_GET_SESSION
+   if (pidfd >= 0)
+     sd_pidfd_get_session (pidfd, &session_str);
+diff --git a/polkit/src/polkitbackend/polkitd.c b/polkit/src/polkitbackend/polkitd.c
+--- a/polkit/src/polkitbackend/polkitd.c
++++ b/polkit/src/polkitbackend/polkitd.c
+@@ -30,8 +30,10 @@
+ #include <polkit/polkit.h>
+ #include <polkitbackend/polkitbackend.h>
+
+-#ifdef HAVE_LIBSYSTEMD
++#if defined(HAVE_LIBSYSTEMD) && !defined(HAVE_LIBELOGIND)
+ #  include <systemd/sd-daemon.h>
++#elif defined(HAVE_LIBELOGIND)
++#  include <elogind/sd-daemon.h>
+ #endif
+
+ /* ---------------------------------------------------------------------------------------------------- */
+@@ -109,7 +111,7 @@
+ static gboolean
+ on_sighup (gpointer user_data)
+ {
+-#ifdef HAVE_LIBSYSTEMD
++#if defined(HAVE_LIBSYSTEMD) || defined(HAVE_LIBELOGIND)
+   gchar reload_message[sizeof("RELOADING=1\nMONOTONIC_USEC=18446744073709551615")];
+   gint64 monotonic_now;
+
+@@ -126,7 +128,7 @@
+
+   polkit_backend_interactive_authority_reload (POLKIT_BACKEND_INTERACTIVE_AUTHORITY (authority));
+
+-#ifdef HAVE_LIBSYSTEMD
++#if defined(HAVE_LIBSYSTEMD) || defined(HAVE_LIBELOGIND)
+   /* Notify systemd that we have finished reloading. */
+   sd_notify (0, "READY=1\nSTATUS=Processing requests...");
+ #endif
+@@ -291,13 +293,13 @@
+
+   g_print ("Entering main event loop\n");
+
+-#ifdef HAVE_LIBSYSTEMD
++#if defined(HAVE_LIBSYSTEMD) || defined(HAVE_LIBELOGIND)
+   sd_notify (0, "READY=1\nSTATUS=Processing requests...");
+ #endif
+
+   g_main_loop_run (loop);
+
+-#ifdef HAVE_LIBSYSTEMD
++#if defined(HAVE_LIBSYSTEMD) || defined(HAVE_LIBELOGIND)
+   sd_notify (0, "STOPPING=1");
+ #endif
+
+diff --git a/polkit/src/symbol.map b/polkit/src/symbol.map
+--- a/polkit/src/symbol.map
++++ b/polkit/src/symbol.map
+@@ -1,6 +1,11 @@
+ {
+ global:
+   polkit_*;
++  /* Fil-C pizlonation exports pizlonated_<name> aliases for every exported
++   * function, and out-of-library consumers (pkexec, polkitagenttextlistener,
++   * the tests, the g-ir-scanner dumper) reference those aliases directly;
++   * they must not be caught by "local: *". */
++  pizlonated*;
+ local:
+   *;
+ };
