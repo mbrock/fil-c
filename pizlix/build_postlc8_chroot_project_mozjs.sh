@@ -24,7 +24,11 @@ rm -rf pizlonated-mozjs
 cd /sources
 # mozjs's configure requires llvm-objdump (for symbol dumping); Fil-C's
 # toolchain does not ship one. GNU objdump is compatible enough for the
-# standalone js build (which does not invoke it).
+# standalone js build (which does not invoke it). Put the symlink in /usr/bin:
+# build_chroot_late.sh runs with PATH=/usr/bin:/usr/sbin (no /usr/local/bin).
+if ! test -x /usr/bin/llvm-objdump; then
+  ln -s /usr/bin/objdump /usr/bin/llvm-objdump
+fi
 if ! test -x /usr/local/bin/llvm-objdump; then
   ln -s /usr/bin/objdump /usr/local/bin/llvm-objdump
 fi

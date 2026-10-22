@@ -725,6 +725,50 @@ diff --git a/mozjs/js/public/friend/StackLimits.h b/mozjs/js/public/friend/Stack
  }
 
  }  // namespace js
+diff --git a/mozjs/js/src/builtin/Array.cpp b/mozjs/js/src/builtin/Array.cpp
+--- a/mozjs/js/src/builtin/Array.cpp
++++ b/mozjs/js/src/builtin/Array.cpp
+@@ -4233,6 +4233,14 @@
+         std::min(nobj->getDenseInitializedLength(), uint32_t(len));
+     const Value* elements = nobj->getDenseElements();
+
++#ifndef __FILC__
++    // Fil-C: JS::Value is 16 bytes (capability pointer + raw bits), so the
++    // dense elements cannot be scanned as an array of 64-bit words: the
++    // memchr64 fast path below assumes sizeof(Value) == 8 both for the
++    // stride and for the result index math. Skip it and use the generic
++    // iterator, which compares whole Value objects (and under Fil-C compares
++    // the raw address half, which is still identity-correct for
++    // objects/symbols).
+     if (CanUseBitwiseCompareForStrictlyEqual(searchElement) && length > start) {
+       const uint64_t* elementsAsBits =
+           reinterpret_cast<const uint64_t*>(elements);
+@@ -4245,6 +4253,7 @@
+       }
+       return true;
+     }
++#endif
+
+     auto iterator = [elements, start, length](JSContext* cx, auto cmp,
+                                               MutableHandleValue rval) {
+@@ -4482,6 +4491,9 @@
+
+     // For |includes| we need to treat hole values as |undefined| so we use a
+     // different path if searching for |undefined|.
++#ifndef __FILC__
++    // Fil-C: see the comment at the corresponding fast path in
++    // js::array_indexOf — the memchr64 scan assumes 8-byte Values.
+     if (CanUseBitwiseCompareForStrictlyEqual(searchElement) &&
+         !searchElement.isUndefined() && length > start) {
+       if (SIMD::memchr64(reinterpret_cast<const uint64_t*>(elements) + start,
+@@ -4492,6 +4504,7 @@
+       }
+       return true;
+     }
++#endif
+
+     auto iterator = [elements, start, length](JSContext* cx, auto cmp,
+                                               MutableHandleValue rval) {
 diff --git a/mozjs/js/src/builtin/intl/Locale.cpp b/mozjs/js/src/builtin/intl/Locale.cpp
 --- a/mozjs/js/src/builtin/intl/Locale.cpp
 +++ b/mozjs/js/src/builtin/intl/Locale.cpp
