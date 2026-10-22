@@ -4014,8 +4014,20 @@ PAS_NO_RETURN void filc_cc_rets_check_failure(size_t actual_size, size_t expecte
 
 PAS_API PAS_NO_RETURN void filc_stack_overflow_failure_impl(void);
 
+/* Payload copies and fills of at least this many bytes go to libc. The byte loops below take a
+   cycle or more per byte, which made them a measurable share of PHP's run time (strspn masks,
+   hash table resizes, array copies). Only payload bytes are moved here; capabilities live in aux
+   and are copied separately afterwards, so the store granularity does not matter for safety.
+   Callers bound these sizes by FILC_MAX_BYTES_BETWEEN_POLLCHECKS, so the libc call is as short as
+   the loop it replaces. */
+#define FILC_SMALL_MEMOP_LIBC_THRESHOLD 16
+
 static PAS_ALWAYS_INLINE void filc_memset_small(void* ptr, unsigned value, size_t bytes)
 {
+    if (bytes >= FILC_SMALL_MEMOP_LIBC_THRESHOLD) {
+        memset(ptr, (int)value, bytes);
+        return;
+    }
     char* byte_ptr = (char*)ptr;
     char* end_ptr = byte_ptr + bytes;
     while (byte_ptr < end_ptr) {
@@ -4037,6 +4049,10 @@ static PAS_ALWAYS_INLINE void filc_memset_small_word(void* ptr, uintptr_t value,
 
 static PAS_ALWAYS_INLINE void filc_memcpy_small_up(void* dst, void* src, size_t bytes)
 {
+    if (bytes >= FILC_SMALL_MEMOP_LIBC_THRESHOLD) {
+        memmove(dst, src, bytes);
+        return;
+    }
     char* cur_dst = (char*)dst;
     /* HACK: clang ends up generating terrible code if we introduce this cast. We only need the cast
        for g++.
@@ -4056,6 +4072,10 @@ static PAS_ALWAYS_INLINE void filc_memcpy_small_up(void* dst, void* src, size_t 
 
 static PAS_ALWAYS_INLINE void filc_memcpy_small_down(void* dst, void* src, size_t bytes)
 {
+    if (bytes >= FILC_SMALL_MEMOP_LIBC_THRESHOLD) {
+        memmove(dst, src, bytes);
+        return;
+    }
     char* cur_dst = (char*)dst + bytes;
     char* end_dst = (char*)dst;
     char* cur_src = (char*)src + bytes;
