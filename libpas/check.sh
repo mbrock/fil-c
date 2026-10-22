@@ -28,8 +28,9 @@
 set -e
 set -x
 
+rm -rf build
 mkdir -p build
-$MAKE -f Makefile check-pas -j $NCPU
+$MAKE -f Makefile-check check -j $NCPU
 
 set +x
 

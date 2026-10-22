@@ -805,25 +805,14 @@ take_last_empty_consider_view(pas_segregated_directory_iterate_config* config)
             return true;
         }
     } else {
-        pas_lock_switch(&held_lock, &view->ownership_lock);
-        view->is_owned = false;
-        if (verbose) {
-            pas_log("view %p has is_owned = false due to normal decommit in take_last_empty\n",
-                    view);
-        }
         pas_lock_switch(&held_lock, NULL);
         
+        /* The view stays owned until its range is in the decommit log, so that a take that fails leaves
+           nothing to undo and is_owned never reads false for a page that stays owned. Eligibility is still
+           stolen, so nobody can start allocating in the page. */
         if (!pas_segregated_page_take_physically(
                 page, decommit_log, pas_range_is_not_locked, heap_lock_hold_mode)) {
             PAS_ASSERT(!pas_segregated_page_config_kind_is_utility(directory->page_config_kind));
-            
-            pas_lock_switch(&held_lock, &view->ownership_lock);
-            view->is_owned = true;
-            if (verbose) {
-                pas_log("view %p has is_owned = true due to undo of decommit in take_last_empty\n",
-                        view);
-            }
-            pas_lock_switch(&held_lock, NULL);
             
             pas_segregated_directory_view_did_become_eligible_at_index(directory, index);
             pas_segregated_directory_view_did_become_empty_at_index(directory, index);
@@ -831,6 +820,14 @@ take_last_empty_consider_view(pas_segregated_directory_iterate_config* config)
             data->result = pas_page_sharing_pool_take_locks_unavailable;
             return true;
         }
+        
+        pas_lock_switch(&held_lock, &view->ownership_lock);
+        view->is_owned = false;
+        if (verbose) {
+            pas_log("view %p has is_owned = false due to normal decommit in take_last_empty\n",
+                    view);
+        }
+        pas_lock_switch(&held_lock, NULL);
         
         if (verbose) {
             pas_log("%p: did fully take index %zu\n", directory, index);
