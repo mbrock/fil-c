@@ -4040,6 +4040,9 @@ class Pizlonator {
             ConstantInt::get(IntPtrTy, ObjectFlagReadonly | (HasFreeCheck ? ObjectFlagFree : 0)),
             "filc_flags_masked", Inst);
           Masked->setDebugLoc(Inst->getDebugLoc());
+          Masked->setMetadata("filc.check.flags", MDNode::get(C, {}));
+          cast<Instruction>(cast<Instruction>(Masked->getOperand(0))->getOperand(0))
+            ->setMetadata("filc.check.aux", MDNode::get(C, {}));
           ICmpInst* IsNotReadOnly = new ICmpInst(
             Inst, ICmpInst::ICMP_EQ, Masked, ConstantInt::get(IntPtrTy, 0),
             "filc_object_is_not_read_only");
@@ -4059,6 +4062,9 @@ class Pizlonator {
             Instruction::And, flagsForLower(flightPtrLower(FlightPtr, Inst), Inst),
             ConstantInt::get(IntPtrTy, ObjectFlagFree), "filc_flags_masked", Inst);
           Masked->setDebugLoc(Inst->getDebugLoc());
+          Masked->setMetadata("filc.check.flags", MDNode::get(C, {}));
+          cast<Instruction>(cast<Instruction>(Masked->getOperand(0))->getOperand(0))
+            ->setMetadata("filc.check.aux", MDNode::get(C, {}));
           ICmpInst* IsNotFree = new ICmpInst(
             Inst, ICmpInst::ICMP_EQ, Masked, ConstantInt::get(IntPtrTy, 0),
             "filc_object_is_not_free");
@@ -4073,8 +4079,12 @@ class Pizlonator {
           assert(HasUpperBound);
           assert(UpperBoundOffset > LowerBoundOffset);
           Value* Upper;
-          if (PK == PointerKind::Escaping)
+          if (PK == PointerKind::Escaping) {
             Upper = upperForLower(flightPtrLower(FlightPtr, Inst), Inst);
+            // DeleteRedundantPollchecks may keep this in a register across a loop's fast
+            // pollcheck paths, reloading it after slow ones.
+            cast<Instruction>(Upper)->setMetadata("filc.check.upper", MDNode::get(C, {}));
+          }
           else {
             assert(LAD.Size != UINT64_MAX);
             Instruction* GEP = GetElementPtrInst::Create(
