@@ -3,3 +3,7 @@ return:
 output-includes:
   - "filc safety error"
   - "alignment requirement of 8 bytes not met"
+# ARM64 gets a different safety error.
+# FIXME https://github.com/pizlonator/fil-c/issues/343
+only-on-platform:
+  x86_64

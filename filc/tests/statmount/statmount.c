@@ -189,12 +189,12 @@ int main(void)
 
     /* Request sizes above PAGE_SIZE get E2BIG. */
     memset(bigreq, 0, sizeof(bigreq));
-    big_req->size = 5000;
+    big_req->size = 500000;
     big_req->mnt_id = 1;
     errno = 0;
     rc = syscall(SYS_statmount, bigreq, buf, sizeof(buf), 0);
     err = errno;
-    zprintf("statmount size 5000 rc %ld errno %d\n", rc, err);
+    zprintf("statmount size 500000 rc %ld errno %d\n", rc, err);
     ZASSERT(rc == -1);
     ZASSERT(err == E2BIG);
 
