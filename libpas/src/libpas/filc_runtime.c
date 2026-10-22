@@ -2542,6 +2542,25 @@ static PAS_NO_RETURN PAS_NEVER_INLINE void ensure_aux_ptr_free_fail(filc_object*
                       filc_object_to_new_string(object));
 }
 
+/* Bytes of payload the object's slot can hold: the allocation minus what precedes lower. */
+static size_t filc_object_capacity(filc_object* object)
+{
+    char* base = (char*)filc_object_mark_base(object);
+    size_t result = verse_heap_get_allocation_size_inline((uintptr_t)base)
+        - ((char*)filc_object_lower_not_null(object) - base);
+    PAS_TESTING_ASSERT(pas_is_aligned(result, FILC_WORD_SIZE));
+    return result;
+}
+
+size_t filc_object_aux_size(filc_object* object, size_t size)
+{
+    if (PAS_LIKELY(!(filc_object_get_flags(object) & FILC_OBJECT_FLAG_GROWABLE)))
+        return size;
+    /* realloc may raise upper up to the capacity without reallocating the aux, and the collector
+       scans aux up to upper, so the aux must already span the capacity. */
+    return pas_max_uintptr(size, filc_object_capacity(object));
+}
+
 static PAS_ALWAYS_INLINE char* ensure_aux_ptr_slow_size_specialized(
     filc_thread* my_thread, filc_object* object, filc_exit_allowed_mode exit_allowed_mode,
     size_t size, filc_size_mode size_mode)
@@ -2557,6 +2576,8 @@ static PAS_ALWAYS_INLINE char* ensure_aux_ptr_slow_size_specialized(
     PAS_TESTING_ASSERT(object != &filc_free_singleton);
     PAS_TESTING_ASSERT(my_thread->state & FILC_THREAD_STATE_ENTERED);
     PAS_TESTING_ASSERT(size);
+    /* Callers pass the object size they loaded; every aux creation goes through here. */
+    size = filc_object_aux_size(object, size);
     pas_allocation_result aux_ptr_result = filc_thread_allocate(my_thread, size);
     if (verbose) {
         pas_log("allocated aux at %p with size %zu, ending at %p\n",
@@ -2651,6 +2672,7 @@ static PAS_ALWAYS_INLINE char* ensure_aux_ptr_slow_impl(filc_thread* my_thread, 
        freed). */
     if (PAS_UNLIKELY(!size))
         ensure_aux_ptr_zero_size(object);
+    size = filc_object_aux_size(object, size);
     if (PAS_LIKELY(size <= FILC_MAX_BYTES_BETWEEN_POLLCHECKS)) {
         return ensure_aux_ptr_slow_size_specialized(
             my_thread, object, exit_allowed_mode, size, filc_small_size);
@@ -3044,7 +3066,7 @@ filc_object* filc_allocate_finalizable_with_alignment(filc_thread* my_thread,
 
 static filc_object* finish_reallocate(
     filc_thread* my_thread, pas_allocation_result allocation_result, filc_object* old_object,
-    size_t new_size, size_t alignment, size_t offset_to_payload)
+    size_t new_size, size_t alignment, size_t offset_to_payload, filc_object_flags object_flags)
 {
     static const bool verbose = false;
 
@@ -3059,9 +3081,16 @@ static filc_object* finish_reallocate(
     char* old_aux_ptr = filc_object_aux_ptr(old_object);
 
     size_t common_size = pas_min_uintptr(new_size, old_size);
+    /* A growable object's aux spans its whole slot (filc_object_aux_size). */
+    size_t aux_size = new_size;
+    if (object_flags & FILC_OBJECT_FLAG_GROWABLE) {
+        aux_size = verse_heap_get_allocation_size_inline(allocation_result.begin)
+            - offset_to_payload;
+        PAS_TESTING_ASSERT(aux_size >= new_size);
+    }
     pas_allocation_result new_aux_ptr_result = pas_allocation_result_create_failure();
     if (old_aux_ptr) {
-        new_aux_ptr_result = filc_thread_allocate(my_thread, new_size);
+        new_aux_ptr_result = filc_thread_allocate(my_thread, aux_size);
         if (PAS_UNLIKELY(filc_current_marking_state)) {
             /* It's posssible that the allocation of the object observed that we're in black
                allocation mode, but the allocation of the aux didn't, because of how TLCs work. So,
@@ -3072,21 +3101,23 @@ static filc_object* finish_reallocate(
     }
 
     filc_object* result = initialize_object_header(
-        my_thread, (void*)allocation_result.begin, new_size, alignment, offset_to_payload, 0,
-        (char*)new_aux_ptr_result.begin, NULL);
+        my_thread, (void*)allocation_result.begin, new_size, alignment, offset_to_payload,
+        object_flags, (char*)new_aux_ptr_result.begin, NULL);
     if (verbose)
         pas_log("old_object = %p, result = %p\n", old_object, result);
-    if (new_size > FILC_MAX_BYTES_BETWEEN_POLLCHECKS) {
+    if (aux_size > FILC_MAX_BYTES_BETWEEN_POLLCHECKS) {
         if (new_aux_ptr_result.begin)
             filc_push_allocation_root(my_thread, (void*)new_aux_ptr_result.begin);
         filc_exit_with_allocation_root(my_thread, (void*)allocation_result.begin);
     }
     memcpy(filc_object_lower(result), filc_object_lower(old_object), common_size);
-    if (new_size > common_size && !allocation_result.zero_mode)
-        pas_zero_memory((char*)filc_object_lower(result) + common_size, new_size - common_size);
+    /* Zero through the capacity, not just new_size: in-place growth later exposes the slack by
+       raising upper alone, so it must already be initialized when the object is published. */
+    if (aux_size > common_size && !allocation_result.zero_mode)
+        pas_zero_memory((char*)filc_object_lower(result) + common_size, aux_size - common_size);
     if (new_aux_ptr_result.begin && !new_aux_ptr_result.zero_mode)
-        pas_zero_memory((void*)new_aux_ptr_result.begin, new_size);
-    if (new_size > FILC_MAX_BYTES_BETWEEN_POLLCHECKS) {
+        pas_zero_memory((void*)new_aux_ptr_result.begin, aux_size);
+    if (aux_size > FILC_MAX_BYTES_BETWEEN_POLLCHECKS) {
         filc_enter_with_allocation_root(my_thread, (void*)allocation_result.begin);
         if (new_aux_ptr_result.begin)
             filc_pop_allocation_root(my_thread, (void*)new_aux_ptr_result.begin);
@@ -3127,17 +3158,77 @@ static filc_object* finish_reallocate(
     return result;
 }
 
+/* Growing an object one append at a time (realloc to the exact new length each time) copied the
+   whole object every time, so building it took quadratic time. A growing realloc therefore gives
+   its result half again as much slack (FILC_OBJECT_FLAG_GROWABLE), and a later realloc of a
+   growable object that fits its slot just raises upper.
+
+   Invariants of growable objects:
+   - The whole slot capacity, data and aux, was zeroed before the object was published
+     (finish_reallocate), and the aux, if any, spans the capacity (filc_object_aux_size). So
+     raising upper exposes only initialized bytes and zero capabilities, needs no exit, and the
+     collector never scans past the aux.
+   - upper never decreases until free: a shrink keeps upper. A live growable object is never
+     empty, so upper == lower means free has started, and growth must not CAS from it (that would
+     resurrect a freed object).
+
+   Pointers to the object from before the realloc stay valid and see the grown object, as in
+   C implementations that grow in place; only a moving realloc frees the old object. */
+#define FILC_REALLOC_GROWABLE_MIN_SIZE ((size_t)64)
+
+static bool try_reallocate_in_place(filc_object* object, size_t new_size)
+{
+    filc_object_flags flags = filc_object_get_flags(object);
+    if (PAS_LIKELY(!(flags & FILC_OBJECT_FLAG_GROWABLE))
+        || (flags & (FILC_OBJECT_FLAG_FREE | FILC_OBJECT_FLAGS_SPECIAL_MASK)))
+        return false;
+    PAS_TESTING_ASSERT(!(flags & (FILC_OBJECT_FLAG_GLOBAL | FILC_OBJECT_FLAG_MMAP)));
+    if (!new_size || new_size > FILC_MAX_ALLOCATION_SIZE)
+        return false;
+    size_t rounded = pas_round_up_to_power_of_2(new_size, FILC_MINALIGN);
+    char* lower = (char*)filc_object_lower_not_null(object);
+    char* old_upper = (char*)__atomic_load_n(&object->upper, __ATOMIC_RELAXED);
+    /* Free in progress; the moving path's accessibility check reports it. */
+    if (old_upper == lower)
+        return false;
+    size_t old_size = old_upper - lower;
+    if (rounded <= old_size) {
+        /* Keep upper, so the result spans the old contents beyond new_size, as malloc_usable_size
+           permits. Moving releases memory when the object shrinks to below half. */
+        return rounded >= old_size / 2;
+    }
+    if (rounded > filc_object_capacity(object))
+        return false;
+    return __atomic_compare_exchange_n(&object->upper, (void**)&old_upper, lower + rounded,
+                                       false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);
+}
+
 filc_object* filc_reallocate(filc_thread* my_thread, filc_object* object, size_t new_size)
 {
     PAS_TESTING_ASSERT(my_thread == filc_get_my_thread());
     PAS_TESTING_ASSERT(my_thread->state & FILC_THREAD_STATE_ENTERED);
 
+    if (try_reallocate_in_place(object, new_size))
+        return object;
+
+    size_t old_size = filc_object_size_not_null(object);
+    size_t capacity = new_size;
+    filc_object_flags object_flags = 0;
+    if (new_size > old_size && new_size >= FILC_REALLOC_GROWABLE_MIN_SIZE) {
+        capacity = pas_min_uintptr(pas_max_uintptr(new_size, old_size + old_size / 2),
+                                   FILC_MAX_ALLOCATION_SIZE);
+        object_flags = FILC_OBJECT_FLAG_GROWABLE;
+    }
     size_t offset_to_payload;
     size_t total_size;
     prepare_allocate(&new_size, FILC_WORD_SIZE, &offset_to_payload, &total_size);
+    size_t capacity_offset_to_payload;
+    size_t capacity_total_size;
+    prepare_allocate(&capacity, FILC_WORD_SIZE, &capacity_offset_to_payload, &capacity_total_size);
+    PAS_TESTING_ASSERT(capacity_offset_to_payload == offset_to_payload);
     return finish_reallocate(
-        my_thread, filc_thread_allocate(my_thread, total_size),
-        object, new_size, FILC_WORD_SIZE, offset_to_payload);
+        my_thread, filc_thread_allocate(my_thread, capacity_total_size),
+        object, new_size, FILC_WORD_SIZE, offset_to_payload, object_flags);
 }
 
 filc_object* filc_reallocate_with_alignment(filc_thread* my_thread, filc_object* object,
@@ -3152,7 +3243,7 @@ filc_object* filc_reallocate_with_alignment(filc_thread* my_thread, filc_object*
     prepare_allocate(&new_size, alignment, &offset_to_payload, &total_size);
     return finish_reallocate(
         my_thread, verse_heap_allocate_with_alignment(fugc_default_heap, total_size, alignment),
-        object, new_size, alignment, offset_to_payload);
+        object, new_size, alignment, offset_to_payload, 0);
 }
 
 static PAS_NO_RETURN PAS_NEVER_INLINE void free_fail(filc_object* object)
@@ -3173,7 +3264,9 @@ static PAS_ALWAYS_INLINE void free_impl(filc_object* object)
     PAS_TESTING_ASSERT(!filc_object_is_special(object)); /* We could allow freeing special objects
                                                             at some point. */
     PAS_TESTING_ASSERT(!(filc_object_get_flags(object) & FILC_OBJECT_FLAG_GLOBAL));
-    object->upper = filc_object_lower_not_null(object);
+    /* Atomic: try_reallocate_in_place CASes upper concurrently, and treats upper == lower as
+       free in progress. */
+    __atomic_store_n(&object->upper, filc_object_lower_not_null(object), __ATOMIC_RELAXED);
     for (;;) {
         uintptr_t aux = object->aux;
         if ((filc_aux_get_flags(aux) & FILC_OBJECT_FLAG_FREE))

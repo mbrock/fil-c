@@ -193,7 +193,13 @@ typedef uintptr_t filc_word;
                                                                      marked. */
 #define FILC_OBJECT_FLAG_WEAK_KEY         ((filc_object_flags)32) /* The object is being used as a key
                                                                      in one or more weak maps. */
-/* We have flag bit value 64 available. */
+#define FILC_OBJECT_FLAG_GROWABLE         ((filc_object_flags)64) /* realloc gave the object slack:
+                                                                     its aux spans the whole slot
+                                                                     (filc_object_aux_size), and a
+                                                                     later realloc may raise upper
+                                                                     up to the slot's capacity.
+                                                                     upper never decreases until
+                                                                     free. */
 #define FILC_OBJECT_FLAGS_SPECIAL_SHIFT   ((filc_object_flags)7)  /* The shift amount to get to the
                                                                      special type. */
 #define FILC_OBJECT_FLAGS_SPECIAL_MASK    ((filc_object_flags)FILC_SPECIAL_TYPE_MASK \
@@ -2281,6 +2287,10 @@ static inline char* filc_object_aux_ptr(filc_object* object)
 }
 
 /* This almost certainly exits! */
+/* The size of the aux allocation a heap object of the given (already loaded, nonzero) size needs.
+   Every creator of a heap object's aux must use this rather than the size alone. */
+PAS_API size_t filc_object_aux_size(filc_object* object, size_t size);
+
 PAS_API PAS_NEVER_INLINE char* filc_object_ensure_aux_ptr_slow(filc_thread* my_thread,
                                                                filc_object* object);
 
