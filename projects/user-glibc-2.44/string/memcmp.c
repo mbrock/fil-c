@@ -88,19 +88,13 @@ static int memcmp_bytes (op_t, op_t) __THROW;
 static int
 memcmp_bytes (op_t a, op_t b)
 {
-  long int srcp1 = (long int) &a;
-  long int srcp2 = (long int) &b;
-  op_t a0, b0;
-
-  do
-    {
-      a0 = ((byte *) srcp1)[0];
-      b0 = ((byte *) srcp2)[0];
-      srcp1 += 1;
-      srcp2 += 1;
-    }
-  while (a0 == b0);
-  return a0 - b0;
+  /* Fil-C: taking the addresses of A and B made the compiler move them to
+     the heap, and since this function is inlined into memcmp, every memcmp
+     call made eight heap allocations. On little-endian machines the first
+     differing byte in memory is the lowest-order differing byte, so find it
+     by arithmetic. Callers only pass words that differ.  */
+  unsigned int shift = __builtin_ctzl (a ^ b) & ~7u;
+  return (int) ((a >> shift) & 0xff) - (int) ((b >> shift) & 0xff);
 }
 #endif
 
