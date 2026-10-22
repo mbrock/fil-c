@@ -1427,13 +1427,17 @@ static void sweep_and_end(void)
         pas_max_uintptr(proposed_threshold, fugc_minimum_threshold);
     /* The program will allocate up to the new threshold before the next collection, mostly in the
        pages this sweep emptied. Returning those to the OS only to fault them back in, zeroed, a
-       moment later cost PHP servers 8-10% of their cycles. Pages that were already empty when this
+       moment later cost PHP servers 8-10% of their cycles. This is best effort; see
+       pas_scavenger.h. Pages that were already empty when this
        cycle started went a whole allocation period without being reused, so the scavenger may
        return those. If no collection follows within the hold, the ceiling lapses and the
        scavenger's ordinary age limit applies again. */
-    pas_scavenger_epoch_ceiling = cycle_start_epoch;
-    pas_scavenger_epoch_ceiling_expiry =
-        pas_get_epoch() + (uint64_t)fugc_scavenge_hold_milliseconds * 1000000ull;
+    if (!pas_epoch_is_counter && fugc_scavenge_hold_milliseconds) {
+        __atomic_store_n(&pas_scavenger_epoch_ceiling, cycle_start_epoch, __ATOMIC_RELAXED);
+        __atomic_store_n(&pas_scavenger_epoch_ceiling_expiry,
+                         pas_get_epoch() + (uint64_t)fugc_scavenge_hold_milliseconds * 1000000ull,
+                         __ATOMIC_RELEASE);
+    }
     pas_system_condition_broadcast(&collector_thread_state_cond);
     pas_system_mutex_unlock(&collector_thread_state_lock);
 

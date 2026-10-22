@@ -79,8 +79,10 @@ PAS_API extern uint64_t pas_scavenger_max_epoch_delta; /* How much to subtract f
 
 /* A garbage collector knows that memory freed by its last sweep will be allocated again before
    its next collection. While the current epoch is before pas_scavenger_epoch_ceiling_expiry, the
-   scavenger leaves alone pages used at or after pas_scavenger_epoch_ceiling. Once the expiry
-   passes, for example because the program went idle, only pas_scavenger_max_epoch_delta applies. */
+   periodic scavenge does not take pages used after pas_scavenger_epoch_ceiling. Once the expiry
+   passes, for example because the program went idle, only pas_scavenger_max_epoch_delta applies.
+   This is a best-effort hint: it biases periodic scavenging and is read without a lock, so a page
+   may still be decommitted, and forced scavenges ignore it. Access with __atomic builtins. */
 PAS_API extern uint64_t pas_scavenger_epoch_ceiling;
 PAS_API extern uint64_t pas_scavenger_epoch_ceiling_expiry;
 

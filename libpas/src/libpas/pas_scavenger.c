@@ -252,8 +252,8 @@ static pas_thread_return_type scavenger_thread_main(void* arg)
         if (did_overflow)
             max_epoch = PAS_EPOCH_MIN;
 
-        if (epoch < pas_scavenger_epoch_ceiling_expiry) {
-            uint64_t ceiling = pas_scavenger_epoch_ceiling;
+        if (epoch < __atomic_load_n(&pas_scavenger_epoch_ceiling_expiry, __ATOMIC_ACQUIRE)) {
+            uint64_t ceiling = __atomic_load_n(&pas_scavenger_epoch_ceiling, __ATOMIC_RELAXED);
             if (ceiling < max_epoch)
                 max_epoch = pas_max_uint64(ceiling, PAS_EPOCH_MIN);
             /* Keep polling so that the memory goes back once the ceiling expires. */
