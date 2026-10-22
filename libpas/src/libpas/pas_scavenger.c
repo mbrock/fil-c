@@ -65,6 +65,8 @@ pas_scavenger_data* pas_scavenger_data_instance = NULL;
 double pas_scavenger_deep_sleep_timeout_in_milliseconds = 10. * 1000.;
 double pas_scavenger_period_in_milliseconds = 125.;
 uint64_t pas_scavenger_max_epoch_delta = 300ll * 1000ll * 1000ll;
+uint64_t pas_scavenger_epoch_ceiling = 0;
+uint64_t pas_scavenger_epoch_ceiling_expiry = 0;
 
 void (*pas_scavenger_handshake_callback)(void* arg);
 void* pas_scavenger_handshake_callback_arg;
@@ -249,6 +251,14 @@ static pas_thread_return_type scavenger_thread_main(void* arg)
         did_overflow = pas_sub_uint64_overflow(epoch, delta, &max_epoch);
         if (did_overflow)
             max_epoch = PAS_EPOCH_MIN;
+
+        if (epoch < pas_scavenger_epoch_ceiling_expiry) {
+            uint64_t ceiling = pas_scavenger_epoch_ceiling;
+            if (ceiling < max_epoch)
+                max_epoch = pas_max_uint64(ceiling, PAS_EPOCH_MIN);
+            /* Keep polling so that the memory goes back once the ceiling expires. */
+            should_go_again = true;
+        }
 
         if (verbose)
             pas_log("epoch = %llu, delta = %llu, max_epoch = %llu\n", (unsigned long long)epoch, (unsigned long long)delta, (unsigned long long)max_epoch);

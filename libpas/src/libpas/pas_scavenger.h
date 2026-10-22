@@ -77,6 +77,13 @@ PAS_API extern double pas_scavenger_period_in_milliseconds; /* How long to sleep
 PAS_API extern uint64_t pas_scavenger_max_epoch_delta; /* How much to subtract from the current epoch
                                                           to compute the max epoch. */
 
+/* A garbage collector knows that memory freed by its last sweep will be allocated again before
+   its next collection. While the current epoch is before pas_scavenger_epoch_ceiling_expiry, the
+   scavenger leaves alone pages used at or after pas_scavenger_epoch_ceiling. Once the expiry
+   passes, for example because the program went idle, only pas_scavenger_max_epoch_delta applies. */
+PAS_API extern uint64_t pas_scavenger_epoch_ceiling;
+PAS_API extern uint64_t pas_scavenger_epoch_ceiling_expiry;
+
 PAS_API extern void (*pas_scavenger_handshake_callback)(void* arg);
 PAS_API extern void* pas_scavenger_handshake_callback_arg;
 
