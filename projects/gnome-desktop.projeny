@@ -30,6 +30,33 @@ diff --git a/gnome-desktop/libgnome-desktop/gnome-bg/gnome-bg-symbols.map b/gnom
  local:
    *;
  };
+diff --git a/gnome-desktop/libgnome-desktop/gnome-rr/gnome-rr-screen.c b/gnome-desktop/libgnome-desktop/gnome-rr/gnome-rr-screen.c
+--- a/gnome-desktop/libgnome-desktop/gnome-rr/gnome-rr-screen.c
++++ b/gnome-desktop/libgnome-desktop/gnome-rr/gnome-rr-screen.c
+@@ -2445,9 +2445,13 @@
+ GType
+ gnome_rr_dpms_mode_get_type (void)
+ {
++  /* Fil-C port: etype is a GType (a capability pointer under Fil-C), so the
++     pointer variants of g_once_init_enter/leave must be used — the plain
++     variants pass the value through a gsize, which strips the capability and
++     makes every later use of GNOME_RR_TYPE_DPMS_MODE panic. */
+   static GType etype = 0;
+
+-  if (g_once_init_enter (&etype)) {
++  if (g_once_init_enter_pointer (&etype)) {
+     static const GEnumValue values[] = {
+       { GNOME_RR_DPMS_ON, "GNOME_RR_DPMS_ON", "on" },
+       { GNOME_RR_DPMS_STANDBY, "GNOME_RR_DPMS_STANDBY", "standby" },
+@@ -2458,7 +2462,7 @@
+     };
+     GType g_define_type = g_enum_register_static ("GnomeRRDpmsModeType", values);
+
+-    g_once_init_leave (&etype, g_define_type);
++    g_once_init_leave_pointer (&etype, g_define_type);
+   }
+   return etype;
+ }
 diff --git a/gnome-desktop/libgnome-desktop/gnome-rr/gnome-rr-symbols.map b/gnome-desktop/libgnome-desktop/gnome-rr/gnome-rr-symbols.map
 --- a/gnome-desktop/libgnome-desktop/gnome-rr/gnome-rr-symbols.map
 +++ b/gnome-desktop/libgnome-desktop/gnome-rr/gnome-rr-symbols.map

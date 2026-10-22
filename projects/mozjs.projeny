@@ -3768,6 +3768,85 @@ diff --git a/mozjs/js/src/vm/Xdr.cpp b/mozjs/js/src/vm/Xdr.cpp
  #include "js/Transcoding.h"  // JS::TranscodeResult, JS::TranscodeBuffer, JS::TranscodeRange
  #include "js/UniquePtr.h"   // UniquePtr
  #include "js/Utility.h"     // JS::FreePolicy, js_delete
+diff --git a/mozjs/mfbt/Result.h b/mozjs/mfbt/Result.h
+--- a/mozjs/mfbt/Result.h
++++ b/mozjs/mfbt/Result.h
+@@ -221,6 +221,22 @@
+
+   using StorageType = UnsignedIntType<kRequiredSize>;
+
++#if defined(__FILC__)
++  // Fil-C port: upstream stores the success value by memcpy-ing its bits
++  // through the integer mBits member.  The compiler lowers those 8-byte
++  // memcpys to plain integer moves, which strips a pointer's Fil-C
++  // capability, so every `JS::Result<SomePointer*>` that crosses a function
++  // boundary hands back a null-capability pointer that traps on first use
++  // (observed with JS::Result<JSLinearString*> in the Intl available-locale
++  // code — `new Intl.DateTimeFormat(...)` panicked inside
++  // SameOrParentLocale).  Keep the value in a union with a typed view and
++  // store/load it as its real type, like the gc/Cell.h header-word fix; the
++  // integer view is still used for the error low-bit tag.
++  union {
++    StorageType mBits;
++    V mValue;
++  };
++#else
+ #if defined(__clang__)
+   alignas(std::max(alignof(V), alignof(E))) StorageType mBits;
+ #else
+@@ -231,18 +247,33 @@
+   // gcc versions with the bug.
+   alignas(alignof(V) > alignof(E) ? alignof(V) : alignof(E)) StorageType mBits;
+ #endif
++#endif
+
+  public:
+   static constexpr PackingStrategy Strategy = PackingStrategy::LowBitTagIsError;
+
+-  explicit constexpr ResultImplementation(V aValue) : mBits(0) {
++  explicit constexpr ResultImplementation(V aValue)
++#if defined(__FILC__)
++      // Initialize the integer view first (so the low bit is 0 for a fresh
++      // value), then store the success value through its typed view; this
++      // keeps the Fil-C capability of a pointer-typed V.
++      : mBits(0) {
+     if constexpr (!std::is_empty_v<V>) {
++      mValue = aValue;
++    } else {
++      (void)aValue;
++    }
++  }
++#else
++      : mBits(0) {
++    if constexpr (!std::is_empty_v<V>) {
+       std::memcpy(&mBits, &aValue, sizeof(V));
+       MOZ_ASSERT((mBits & 1) == 0);
+     } else {
+       (void)aValue;
+     }
+   }
++#endif
+   explicit constexpr ResultImplementation(E aErrorValue) : mBits(1) {
+     if constexpr (!std::is_empty_v<E>) {
+       std::memcpy(&mBits, &aErrorValue, sizeof(E));
+@@ -256,9 +287,17 @@
+   constexpr bool isOk() const { return (mBits & 1) == 0; }
+
+   constexpr V inspect() const {
++#if defined(__FILC__)
++    if constexpr (!std::is_empty_v<V>) {
++      return mValue;
++    } else {
++      return V{};
++    }
++#else
+     V res;
+     std::memcpy(&res, &mBits, sizeof(V));
+     return res;
++#endif
+   }
+   constexpr V unwrap() { return inspect(); }
+
 diff --git a/mozjs/mozglue/misc/SSE.cpp b/mozjs/mozglue/misc/SSE.cpp
 --- a/mozjs/mozglue/misc/SSE.cpp
 +++ b/mozjs/mozglue/misc/SSE.cpp
