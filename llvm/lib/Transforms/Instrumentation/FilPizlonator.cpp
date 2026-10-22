@@ -57,7 +57,7 @@ static cl::opt<bool> copyLocalsForCallsOpt(
   "filc-copy-locals-for-calls",
   cl::desc("Keep locals on the stack when their address only escapes into nocapture call "
            "arguments or constant-size memsets, by giving each such call a heap copy"),
-  cl::Hidden, cl::init(true));
+  cl::Hidden, cl::init(false));
 static cl::opt<bool> logAllocations(
   "filc-log-allocations", cl::desc("Make FilC emit code to log every allocation"),
   cl::Hidden, cl::init(false));
@@ -16145,9 +16145,14 @@ class Pizlonator {
         APInt Offset(DL.getIndexTypeSizeInBits(MS->getDest()->getType()), 0);
         Value* Base = MS->getDest()->stripAndAccumulateConstantOffsets(DL, Offset, true);
         AllocaInst* AI = dyn_cast<AllocaInst>(Base);
-        if (!AI || !AI->isStaticAlloca() || Offset.isNegative())
+        // Only whole, aligned words with a constant fill: the runtime memset clears the capability
+        // of every word it touches, which a partial-word integer store would not, and a
+        // non-constant fill could be laundered back into a capability-carrying pointer.
+        if (!AI || !AI->isStaticAlloca() || Offset.isNegative() || !isa<ConstantInt>(MS->getValue())
+            || AI->getAlign() < Align(WordSize) || Offset.getZExtValue() % WordSize
+            || Len->getZExtValue() % WordSize)
           continue;
-        Memsets.push_back({ MS, AI->getAlign() >= Align(WordSize) ? Offset.getZExtValue() : 1 });
+        Memsets.push_back({ MS, 0 });
       }
     }
     for (auto& Pair : Memsets) {
