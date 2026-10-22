@@ -13,11 +13,13 @@
 #include "llvm/Transforms/Instrumentation/FilPizlonator.h"
 
 #include <llvm/Analysis/CFG.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Demangle/Demangle.h>
 #include <llvm/IR/Comdat.h>
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/IR/TypedPointerType.h>
@@ -55,6 +57,10 @@ static cl::opt<bool> logAllocations(
   cl::Hidden, cl::init(false));
 static cl::opt<bool> optimizeChecks(
   "filc-optimize-checks", cl::desc("Pick an optimal schedule for checks"),
+  cl::Hidden, cl::init(true));
+static cl::opt<bool> frameAliasScope(
+  "filc-frame-alias-scope",
+  cl::desc("Tell alias analysis that Fil-C frame accesses do not alias other loads and stores"),
   cl::Hidden, cl::init(true));
 static cl::opt<bool> propagateChecksBackward(
   "filc-propagate-checks-backward", cl::desc("Perform backward propagation of checks"),
@@ -1692,6 +1698,7 @@ class Pizlonator {
   size_t FrameSize { SIZE_MAX };
   size_t NumStackAuxes { SIZE_MAX };
   Value* Frame;
+  MDNode* FrameScopeList = nullptr;
 
   std::vector<Instruction*> ToErase;
 
@@ -3584,6 +3591,49 @@ class Pizlonator {
     
     CanonicalPtrAuxBaseVars[P] = Result;
     return Result;
+  }
+
+  // The Fil-C frame (the lowers that root this function's pointers, and the origin) is only
+  // accessed by this function, through pointers derived from the frame alloca, and by the runtime
+  // and the GC, which only see it from within calls (safepoints happen inside calls). But the frame
+  // escapes into the thread's frame list, so alias analysis has to assume that the frame stores
+  // that record lowers, which come before almost every safepoint, may alias any other load or
+  // store, such as loads of object headers. Put loads and stores of the frame in a scope that
+  // every other load and store of this function is noalias with, so that header and other loads
+  // can be CSEd across frame stores. Calls are left alone and stay barriers for frame accesses.
+  // All frames share one scope, which is sound because no capability-authorized load or store
+  // ever reaches a frame: user code can learn a frame's address (__builtin_frame_address,
+  // zget_jmp_buf_impl_frame) but gets no capability for it, and the only loads and stores of a
+  // frame that this pass emits go through GEPs of that frame's own alloca. That still holds after
+  // inlining. This must run once, here, on freshly lowered code: rerunning it after native frame
+  // observers get inlined would mark their top_frame-derived loads noalias with the frame. The
+  // second return of setjmp relies on _setjmp staying an opaque call that may write the frame.
+  void tagFrameAccesses() {
+    if (!frameAliasScope)
+      return;
+    if (!FrameScopeList) {
+      MDBuilder MDB(C);
+      MDNode* Domain = MDB.createAnonymousAliasScopeDomain("filc_frame_domain");
+      MDNode* Scope = MDB.createAnonymousAliasScope(Domain, "filc_frame");
+      FrameScopeList = MDNode::get(C, { Scope });
+    }
+    for (BasicBlock& BB : *NewF) {
+      for (Instruction& I : BB) {
+        Value* Ptr;
+        if (LoadInst* LI = dyn_cast<LoadInst>(&I))
+          Ptr = LI->getPointerOperand();
+        else if (StoreInst* SI = dyn_cast<StoreInst>(&I))
+          Ptr = SI->getPointerOperand();
+        else
+          continue;
+        if (getUnderlyingObject(Ptr, 0) == Frame)
+          I.setMetadata(LLVMContext::MD_alias_scope, FrameScopeList);
+        else
+          I.setMetadata(
+            LLVMContext::MD_noalias,
+            MDNode::concatenate(I.getMetadata(LLVMContext::MD_noalias), FrameScopeList));
+      }
+    }
   }
 
   void storeOrigin(Value* Origin, Instruction* InsertBefore) {
@@ -17520,6 +17570,8 @@ public:
 
         if (verbose)
           errs() << "New function after getter optimization: " << *NewF << "\n";
+
+        tagFrameAccesses();
 
         FrameSize = SIZE_MAX;
         NumStackAuxes = SIZE_MAX;
