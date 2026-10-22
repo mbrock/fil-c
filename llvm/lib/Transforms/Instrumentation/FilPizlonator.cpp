@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Instrumentation/FilPizlonator.h"
+#include "llvm/IR/MDBuilder.h"
 
 #include <llvm/Analysis/CFG.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -1606,6 +1607,7 @@ class Pizlonator {
   FunctionCallee DoNothing;
 
   Constant* CurrentMarkingState;
+  Constant* GlobalInitializationThread;
 
   std::unordered_map<AllocaInst*, PointerKind> AllocaKinds;
   std::unordered_set<AllocaInst*> AlwaysLive;
@@ -7033,6 +7035,128 @@ class Pizlonator {
     return false;
   }
 
+  // A global defined in another module (or one that may be interposed) is reached by calling its
+  // getter, and a getter call is opaque to the optimizer: every use of the global's address, and
+  // every direct call to a function in another module, called it again. A getter returns the same
+  // flight pointer every time once it has returned, so callers cache it in a private slot of their
+  // own module and call the getter only while the slot is empty. The getter call itself keeps its
+  // effects, so frame records and safepoints in its slow path are unaffected.
+  //
+  // Only user functions cache. A getter's slow path (a global's initializer) can see a global
+  // that this thread is still initializing, through the recursion path of
+  // filc_global_initialization_start; caching that pointer would let other threads skip the
+  // initialization lock and read the global before it is initialized. User code never runs
+  // during global initialization, so a getter called from it returns only fully initialized
+  // globals.
+  //
+  // The slot's two words are loaded and stored separately, like the getter's own fast path does.
+  // Every writer stores the same value over null, so a torn read sees a null half and takes the
+  // slow path, never a mismatched pair. Stores are release, so a thread that reads the slot and
+  // dereferences it (an address dependency, as in the getter's fast path) sees the global's
+  // initialized contents. The cached object is a global or function
+  // of the defining module, which that module's own pointer slot keeps alive, so the cache needs no
+  // GC root. Thread-local getters return a different pointer per thread, and weak or ifunc getters
+  // are left alone.
+  std::unordered_map<Function*, GlobalVariable*> GetterCaches;
+
+  bool shouldCacheGetter(GlobalValue* G) {
+    if (G->isThreadLocal() || isa<GlobalIFunc>(G))
+      return false;
+    return G->isDeclaration() || G->isInterposable();
+  }
+
+  // Turns a getter call CI into a load of the getter's cache slot, calling the getter (CI itself)
+  // only when the slot is empty. Runs after optimizeGetters' CSE, so each surviving call becomes one
+  // check. The miss path publishes the result only if it is a permanent, initialized global:
+  //
+  // - Its object has FILC_OBJECT_FLAG_GLOBAL. A declaration says nothing reliable about the
+  //   definition: a getter that returns a thread-local (declared non-TLS here but TLS elsewhere) or
+  //   a heap object (an ifunc) is called every time, as before.
+  // - This thread does not own global initialization. A getter can return a global whose
+  //   initializer is still running on this thread (the recursion path of
+  //   filc_global_initialization_start, reachable from user code in a signal handler delivered
+  //   during an initializer); publishing it would let other threads skip the initialization lock.
+  //   Only the owner stores its own pointer in filc_global_initialization_thread, so a relaxed read
+  //   that sees MyThread is exact.
+  //
+  // Every published value is the getter's unique final result, so the two halves are each either
+  // null or that value and a torn read (one null half) takes the miss path. The getter's own fast
+  // path reads its pointer slot with relaxed loads, so the miss path fences acquire before
+  // publishing with release stores, and the hit path loads with acquire: a thread that uses a
+  // cached pointer sees the global's initialized contents without relying on address dependencies
+  // surviving optimization.
+  void expandCachedGetterCall(CallInst* CI) {
+    Function* Getter = CI->getCalledFunction();
+    DebugLoc DL = CI->getDebugLoc();
+    GlobalVariable*& Cache = GetterCaches[Getter];
+    if (!Cache) {
+      Cache = new GlobalVariable(
+        M, FlightPtrTy, false, GlobalValue::PrivateLinkage, FlightNull,
+        "pizlonatedGC_" + Getter->getName());
+      Cache->setAlignment(Align(FlightPtrAlign));
+    }
+    auto Located = [&] (Instruction* I) { I->setDebugLoc(DL); return I; };
+    Instruction* InsertBefore = CI;
+    Instruction* Lower = Located(new LoadInst(
+      RawPtrTy, flightPtrLowerPtr(Cache, InsertBefore), "filc_getter_cache_lower", false, Align(8),
+      AtomicOrdering::Acquire, SyncScope::System, InsertBefore));
+    Instruction* RawPtr = Located(new LoadInst(
+      RawPtrTy, flightPtrPtrPtr(Cache, InsertBefore), "filc_getter_cache_ptr", false, Align(8),
+      AtomicOrdering::Acquire, SyncScope::System, InsertBefore));
+    Instruction* IsEmpty = Located(BinaryOperator::Create(
+      Instruction::Or,
+      Located(new ICmpInst(InsertBefore, ICmpInst::ICMP_EQ, Lower, RawNull, "filc_getter_cache_lower_is_null")),
+      Located(new ICmpInst(InsertBefore, ICmpInst::ICMP_EQ, RawPtr, RawNull, "filc_getter_cache_ptr_is_null")),
+      "filc_getter_cache_is_empty", InsertBefore));
+    Value* Cached = createFlightPtr(Lower, RawPtr, InsertBefore);
+    BasicBlock* CachedBB = InsertBefore->getParent();
+    Instruction* MissTerm = SplitBlockAndInsertIfThen(
+      IsEmpty, InsertBefore, false, MDBuilder(C).createBranchWeights(1, 1000));
+    PHINode* Result = PHINode::Create(FlightPtrTy, 2, "filc_cached_getter_result", CI);
+    Result->setDebugLoc(DL);
+    CI->replaceAllUsesWith(Result);
+    CI->moveBefore(MissTerm);
+
+    Located(new FenceInst(C, AtomicOrdering::Acquire, SyncScope::System, MissTerm));
+    Value* NewLower = flightPtrLower(CI, MissTerm);
+    Value* NewPtr = flightPtrPtr(CI, MissTerm);
+    Instruction* BothNonNull = Located(BinaryOperator::Create(
+      Instruction::And,
+      Located(new ICmpInst(MissTerm, ICmpInst::ICMP_NE, NewLower, RawNull, "filc_getter_result_lower_nonnull")),
+      Located(new ICmpInst(MissTerm, ICmpInst::ICMP_NE, NewPtr, RawNull, "filc_getter_result_ptr_nonnull")),
+      "filc_getter_result_nonnull", MissTerm));
+    Instruction* CheckTerm = SplitBlockAndInsertIfThen(BothNonNull, MissTerm, false);
+    Instruction* AuxPtr = Located(GetElementPtrInst::Create(
+      Int8Ty, NewLower, { ConstantInt::get(IntPtrTy, -8) }, // filc_object::aux, just below lower
+      "filc_getter_result_aux_ptr", CheckTerm));
+    Instruction* Aux = Located(new LoadInst(
+      IntPtrTy, AuxPtr, "filc_getter_result_aux", false, Align(8), AtomicOrdering::Monotonic,
+      SyncScope::System, CheckTerm));
+    Instruction* IsGlobal = Located(new ICmpInst(
+      CheckTerm, ICmpInst::ICMP_NE,
+      Located(BinaryOperator::Create(
+        Instruction::And, Aux,
+        ConstantInt::get(IntPtrTy, static_cast<uint64_t>(1) << 48), "filc_getter_result_global_bit",
+        CheckTerm)),
+      ConstantInt::get(IntPtrTy, 0), "filc_getter_result_is_global"));
+    Instruction* InitThread = Located(new LoadInst(
+      RawPtrTy, GlobalInitializationThread, "filc_global_initialization_thread", false, Align(8),
+      AtomicOrdering::Monotonic, SyncScope::System, CheckTerm));
+    Instruction* NotInitializing = Located(new ICmpInst(
+      CheckTerm, ICmpInst::ICMP_NE, InitThread, CI->getArgOperand(0), "filc_not_initializing"));
+    Instruction* Publish = Located(BinaryOperator::Create(
+      Instruction::And, IsGlobal, NotInitializing, "filc_getter_cache_publish", CheckTerm));
+    Instruction* StoreTerm = SplitBlockAndInsertIfThen(Publish, CheckTerm, false);
+    Located(new StoreInst(
+      NewLower, flightPtrLowerPtr(Cache, StoreTerm), false, Align(8),
+      AtomicOrdering::Release, SyncScope::System, StoreTerm));
+    Located(new StoreInst(
+      NewPtr, flightPtrPtrPtr(Cache, StoreTerm), false, Align(8),
+      AtomicOrdering::Release, SyncScope::System, StoreTerm));
+    Result->addIncoming(Cached, CachedBB);
+    Result->addIncoming(CI, MissTerm->getParent());
+  }
+
   Value* constantToFlightValue(Constant* C, Instruction* InsertBefore) {
     if (ultraVerbose)
       errs() << "constantToFlightValue(" << *C << ")\n";
@@ -7069,6 +7193,8 @@ class Pizlonator {
         Result->addIncoming(NotNullResult, NotNullResult->getParent());
         return Result;
       }
+      if (OldF && shouldCacheGetter(G) && !GetterCaches.count(Getter))
+        GetterCaches[Getter] = nullptr;
       Instruction* Result = CallInst::Create(
         PizlonatedGetterTy, Getter, { MyThread, getOrigin(InsertBefore->getDebugLoc()) },
         "filc_call_getter", InsertBefore);
@@ -16350,6 +16476,17 @@ class Pizlonator {
     }
 
     simpleCSE(*NewF, GetterCallsForGetter);
+
+    std::vector<CallInst*> ToCache;
+    for (BasicBlock& BB : *NewF) {
+      for (Instruction& I : BB) {
+        CallInst* CI = dyn_cast<CallInst>(&I);
+        if (CI && CI->getCalledFunction() && GetterCaches.count(CI->getCalledFunction()))
+          ToCache.push_back(CI);
+      }
+    }
+    for (CallInst* CI : ToCache)
+      expandCachedGetterCall(CI);
   }
 
 public:
@@ -16787,6 +16924,7 @@ public:
     cast<Function>(OptimizedStackAccessCheckFail.getCallee())->addFnAttr(Attribute::NoReturn);
 
     CurrentMarkingState = M.getOrInsertGlobal("filc_current_marking_state", Int32Ty);
+    GlobalInitializationThread = M.getOrInsertGlobal("filc_global_initialization_thread", RawPtrTy);
 
     std::vector<GlobalValue*> ToDelete;
     auto HandleGlobal = [&] (GlobalValue* G) {
