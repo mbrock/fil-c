@@ -369,19 +369,24 @@ void CGRecordLowering::lowerUnion(bool isNonVirtualBaseType) {
   // including pointers hidden by the ordinary storage-field heuristic. Keep
   // the AST byte layout exact: packed unions may have a partial final word.
   if (HasPointers) {
-    // Synthetic pointer words must agree with every alternative's pointer
-    // alignment. In particular, an aligned outer union does not repair a
-    // packed member with a pointer at byte 1. Reject rather than introducing
-    // a second, pointer-free transport representation for such layouts.
-    for (const FieldDecl *Field : D->fields())
-      if (!Field->isBitField() &&
-          CodeGenTypes::hasUnalignedPointers(getStorageType(Field),
-                                             Layout.getAlignment(), DataLayout))
-        Types.getCGM().ErrorUnsupported(Field,
-                                        "unaligned pointer-bearing union");
     llvm::Type *Pointer = llvm::PointerType::get(Types.getLLVMContext(), 0);
     CharUnits WordSize =
         CharUnits::fromQuantity(DataLayout.getTypeAllocSize(Pointer));
+    // Synthetic pointer words must agree with every alternative's pointer
+    // offsets. In particular, an aligned outer union does not repair a
+    // packed member with a pointer at byte 1. Reject rather than introducing
+    // a second, pointer-free transport representation for such layouts.
+    // Offsets are relative to a word-aligned start: a packed union whose
+    // pointers are word-aligned relative to its start is accepted, and the
+    // pointer-word accesses check each instance's actual alignment at run
+    // time, as they do for any other packed pointer.
+    for (const FieldDecl *Field : D->fields())
+      if (!Field->isBitField() &&
+          CodeGenTypes::hasUnalignedPointers(
+              getStorageType(Field), std::max(Layout.getAlignment(), WordSize),
+              DataLayout))
+        Types.getCGM().ErrorUnsupported(Field,
+                                        "unaligned pointer-bearing union");
     SmallVector<llvm::Type *, 2> Words;
     if (uint64_t Count = LayoutSize / WordSize)
       Words.push_back(llvm::ArrayType::get(Pointer, Count));
@@ -1151,10 +1156,17 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
 
   // Check effective offsets and array strides, not just the packed attribute.
   // This deliberately restricts union-containing records; ordinary packed
-  // records keep their existing checked pointer-access behavior.
+  // records keep their existing checked pointer-access behavior. Offsets are
+  // relative to a word-aligned start: an underaligned record is accepted when
+  // its pointers are word-aligned relative to that start (systemd's packed
+  // HashmapBase storage union). Whether an instance actually starts at a word
+  // boundary is checked at run time by each pointer-word access; an outer
+  // record that places it at a misaligned offset is rejected here.
   QualType RecordTy = getContext().getRecordType(D);
   if (RecordTy.hasUnion()) {
-    CharUnits Alignment = getContext().getASTRecordLayout(D).getAlignment();
+    CharUnits Alignment = std::max(
+        getContext().getASTRecordLayout(D).getAlignment(),
+        CharUnits::fromQuantity(getDataLayout().getPointerSize()));
     if (hasUnalignedPointers(Ty, Alignment, getDataLayout()) ||
         (BaseTy && hasUnalignedPointers(BaseTy, Alignment, getDataLayout())))
       CGM.ErrorUnsupported(D, "unaligned pointer-bearing union storage");
