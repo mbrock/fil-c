@@ -32,6 +32,8 @@
 #include "fugc.h"
 #include "pas_fd_stream.h"
 #include "pas_ptr_hash_set.h"
+#include "pas_epoch.h"
+#include "pas_scavenger.h"
 #include "verse_heap_mark_bits_page_commit_controller.h"
 #include "verse_heap_object_set_inlines.h"
 #include <signal.h>
@@ -71,6 +73,10 @@ bool fugc_verify_weak_census = false;
 unsigned fugc_number_of_cores;
 unsigned fugc_threads_override = 0;
 double fugc_threshold_multiplier = 1.5;
+/* How long after a collection the scavenger keeps the memory it freed, if no further collection
+   happens; see sweep_and_end(). */
+size_t fugc_scavenge_hold_milliseconds = 10000;
+static uint64_t cycle_start_epoch;
 
 pas_heap* fugc_default_heap;
 pas_heap* fugc_destructor_heap;
@@ -601,6 +607,7 @@ static void wait_and_start_marking(void)
     }
 
     verse_heap_live_bytes_trigger_threshold = SIZE_MAX;
+    cycle_start_epoch = pas_get_epoch();
 
     if (fugc_verbose >= VERBOSE_CYCLES)
         overall_start_time = pas_get_time_in_milliseconds();
@@ -1418,6 +1425,15 @@ static void sweep_and_end(void)
     PAS_ASSERT(proposed_threshold >= surviving_bytes);
     verse_heap_live_bytes_trigger_threshold =
         pas_max_uintptr(proposed_threshold, fugc_minimum_threshold);
+    /* The program will allocate up to the new threshold before the next collection, mostly in the
+       pages this sweep emptied. Returning those to the OS only to fault them back in, zeroed, a
+       moment later cost PHP servers 8-10% of their cycles. Pages that were already empty when this
+       cycle started went a whole allocation period without being reused, so the scavenger may
+       return those. If no collection follows within the hold, the ceiling lapses and the
+       scavenger's ordinary age limit applies again. */
+    pas_scavenger_epoch_ceiling = cycle_start_epoch;
+    pas_scavenger_epoch_ceiling_expiry =
+        pas_get_epoch() + (uint64_t)fugc_scavenge_hold_milliseconds * 1000000ull;
     pas_system_condition_broadcast(&collector_thread_state_cond);
     pas_system_mutex_unlock(&collector_thread_state_lock);
 
@@ -1553,6 +1569,7 @@ void fugc_parse_settings(void)
     filc_get_unsigned_env("FUGC_THREADS", &fugc_threads_override);
 
     filc_get_double_env("FUGC_THRESHOLD_MULTIPLIER", &fugc_threshold_multiplier);
+    filc_get_size_env("FUGC_SCAVENGE_HOLD_MS", &fugc_scavenge_hold_milliseconds);
     PAS_ASSERT(fugc_threshold_multiplier >= 1.);
 }
 
