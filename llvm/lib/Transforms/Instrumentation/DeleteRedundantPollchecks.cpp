@@ -170,6 +170,30 @@ struct DeleteRedundantPollchecks {
     return false;
   }
 
+  // Access checks usually fold the null test into one branch with the lower
+  // bound test (`lower == null || ptr < lower`), which isKnownNonZero does
+  // not look through; isImpliedCondition decomposes it.
+  bool knownNonNullAt(Value *V, BasicBlock *BB, DominatorTree &DT) {
+    if (isKnownNonZero(V, SimplifyQuery(DL, &DT, nullptr, BB->getTerminator())))
+      return true;
+    Value *Null = ConstantPointerNull::get(cast<PointerType>(V->getType()));
+    for (DomTreeNode *N = DT.getNode(BB); N && N->getIDom(); N = N->getIDom()) {
+      BasicBlock *Dom = N->getIDom()->getBlock();
+      auto *Br = dyn_cast<BranchInst>(Dom->getTerminator());
+      if (!Br || !Br->isConditional())
+        continue;
+      for (unsigned Idx = 0; Idx < 2; ++Idx) {
+        if (!DT.dominates(BasicBlockEdge(Dom, Br->getSuccessor(Idx)), BB))
+          continue;
+        std::optional<bool> Implied = isImpliedCondition(
+            Br->getCondition(), ICmpInst::ICMP_NE, V, Null, DL, Idx == 0);
+        if (Implied && *Implied)
+          return true;
+      }
+    }
+    return false;
+  }
+
   bool hoistChecksInLoop(Loop *L, DominatorTree &DT, LoopInfo &LI) {
     if (!loopIsEligible(L))
       return false;
@@ -198,8 +222,7 @@ struct DeleteRedundantPollchecks {
         if (!GEP || !L->hasLoopInvariantOperands(GEP))
           continue;
         Value *Lower = GEP->getPointerOperand();
-        if (!isKnownNonZero(Lower, SimplifyQuery(DL, &DT, nullptr,
-                                                 Preheader->getTerminator())))
+        if (!knownNonNullAt(Lower, Preheader, DT))
           continue;
         std::vector<Use *> Uses;
         for (Use &U : LI->uses()) {
