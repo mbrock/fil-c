@@ -1,0 +1,6 @@
+URL: https://download.gnome.org/sources/gjs/1.80/gjs-1.80.2.tar.xz 33ee8d84b0d9da143c7ef64c11f197ba5254f20ad719334b5f9615ae13ff56de
+URL: https://ftp.gnome.org/pub/GNOME/sources/gjs/1.80/gjs-1.80.2.tar.xz 33ee8d84b0d9da143c7ef64c11f197ba5254f20ad719334b5f9615ae13ff56de
+Origname: gjs-1.80.2
+Name: gjs
+
+    gjs 1.80.2 (GNOME 46 JavaScript bindings), the JS runtime for gnome-shell. Needs mozjs-115 (any 115.x), glib, gobject-introspection, libffi, cairo (optional), readline (optional); build with -Dprofiler=disabled to drop sysprof-capture-4 and -Dbsymbolic_functions=false (no -Wl,-Bsymbolic-functions under Fil-C).

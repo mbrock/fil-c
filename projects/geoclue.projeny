@@ -1,0 +1,5 @@
+URL: https://deb.debian.org/debian/pool/main/g/geoclue-2.0/geoclue-2.0_2.7.2.orig.tar.bz2 8cd03c26966675274af0a001506d199f6496df9cf270ae1becc504437e5837af
+Origname: geoclue-2.7.2
+Name: geoclue
+
+    geoclue 2.7.2 (location D-Bus service; gnome-shell uses its agent interface). gitlab.freedesktop.org is Anubis-blocked from here (like libei in an earlier sprint), so the Debian pool orig tarball is the canonical source. Root dir is geoclue-2.7.2.

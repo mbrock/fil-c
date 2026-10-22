@@ -1,0 +1,5 @@
+URL: https://deb.debian.org/debian/pool/main/a/accountsservice/accountsservice_23.13.9.orig.tar.xz 6d90a16ce02f272896bd2cf8d53f043d91af414df9996917ec113ac6132f3e2f
+Origname: accountsservice-23.13.9
+Name: accountsservice
+
+    accountsservice 23.13.9 (user account D-Bus service; gnome-shell's user menu + GDM greeter use its org.freedesktop.Accounts API). Releases moved to gitlab.freedesktop.org; the Debian pool orig tarball is the canonical tarball.

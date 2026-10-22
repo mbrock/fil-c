@@ -1,0 +1,6 @@
+URL: https://download.gnome.org/sources/geocode-glib/3.26/geocode-glib-3.26.4.tar.xz 0ee660bf041521268c93372ace91684aea9cad0935872c53a9215ba5066e5330
+URL: https://ftp.gnome.org/pub/GNOME/sources/geocode-glib/3.26/geocode-glib-3.26.4.tar.xz 0ee660bf041521268c93372ace91684aea9cad0935872c53a9215ba5066e5330
+Origname: geocode-glib-3.26.4
+Name: geocode-glib
+
+    geocode-glib 3.26.4 (geocoding helper library; libgweather-4 depends on it). Last 3.26 release - the 3.26 series is what libgweather 4.4 uses.

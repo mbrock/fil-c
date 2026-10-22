@@ -1,0 +1,6 @@
+URL: https://download.gnome.org/sources/gnome-menus/3.36/gnome-menus-3.36.0.tar.xz c9d7c6b9e1fc9ea7d7b7b6e92da8cadcfa3610d688b93588e567a0f11b62f10b
+URL: https://ftp.gnome.org/pub/GNOME/sources/gnome-menus/3.36/gnome-menus-3.36.0.tar.xz c9d7c6b9e1fc9ea7d7b7b6e92da8cadcfa3610d688b93588e567a0f11b62f10b
+Origname: gnome-menus-3.36.0
+Name: gnome-menus
+
+    gnome-menus 3.36.0 (freedesktop.org .menu file parsing, libgnome-menu-3). Created as groundwork; gnome-shell 46's meson does not hard-require it, but the shell's app-grid code falls back to it and having it installed is harmless.

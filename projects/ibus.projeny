@@ -1,0 +1,5 @@
+URL: https://github.com/ibus/ibus/releases/download/1.5.30/ibus-1.5.30.tar.gz 0cc837cc2a3d764b35d7168add94c284d47cde22f7cb9c7e57c1262d5c510d68
+Origname: ibus-1.5.30
+Name: ibus
+
+    ibus 1.5.30 (Intelligent Input Bus; gnome-shell 46 talks to ibus-daemon via D-Bus and links libibus). GitHub release tarball; the freedesktop.org ibus release pages no longer carry 1.5.x tarballs.

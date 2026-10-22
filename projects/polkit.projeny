@@ -1,0 +1,6 @@
+URL: http://archive.ubuntu.com/ubuntu/pool/main/p/policykit-1/policykit-1_126.orig.tar.gz 822b19a17845611876d3624a0cbe9c6231d23e7316d86e383c5694faa544b19f
+URL: http://deb.debian.org/debian/pool/main/p/policykit-1/policykit-1_126.orig.tar.gz 822b19a17845611876d3624a0cbe9c6231d23e7316d86e383c5694faa544b19f
+Origname: polkit-126
+Name: polkit-126
+
+    polkit 126 (PolicyKit authorization manager). Ubuntu/Debian orig tarball (identical bytes in both pools; upstream's own release pages 404 and the GitHub release carries no tarball assets). Uses its bundled duktape JS engine, so no mozjs dependency.

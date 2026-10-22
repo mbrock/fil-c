@@ -1,0 +1,6 @@
+URL: https://download.gnome.org/sources/gnome-shell/46/gnome-shell-46.9.tar.xz 7955db45beb35410bd9726339e6759d2ee5cfb142e7bedbdff548194cd5c5c83
+URL: https://ftp.gnome.org/pub/GNOME/sources/gnome-shell/46/gnome-shell-46.9.tar.xz 7955db45beb35410bd9726339e6759d2ee5cfb142e7bedbdff548194cd5c5c83
+Origname: gnome-shell-46.9
+Name: gnome-shell
+
+    gnome-shell 46.9 (the GNOME 46 Shell; pinned to 46.9 to match the mutter 46.9 already in the tree - 46.10 exists but pairs with a mutter we do not carry). Build flags: -Dnetworkmanager=false -Dcamera_monitor=false -Dsystemd=false -Dtests=false -Dman=false; js/misc/dependencies.js gets patched to make Gdm/Rsvg/Malcontent optional.

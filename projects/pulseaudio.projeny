@@ -1,0 +1,5 @@
+URL: https://freedesktop.org/software/pulseaudio/releases/pulseaudio-17.0.tar.xz e56408636f88e3c8b7575795722ebccd7cadb032f7cefda3d055af549b34df4f
+Origname: pulseaudio-17.0
+Name: pulseaudio
+
+    PulseAudio 17.0. For gnome-shell we only build the client libraries (libpulse/libpulse-mainloop-glib + headers): configure with -Ddaemon=false so the server side (which would need a much bigger port) is skipped. gnome-shell's gvc (libgvc) subproject links against libpulse only.

@@ -1,0 +1,6 @@
+URL: https://download.gnome.org/sources/gcr/4.3/gcr-4.3.0.tar.xz 5b1f9c0a4055d64ce8f9293cbb65bfb47f9ecff2caf497fa93a635fbf5872321
+URL: https://ftp.gnome.org/pub/GNOME/sources/gcr/4.3/gcr-4.3.0.tar.xz 5b1f9c0a4055d64ce8f9293cbb65bfb47f9ecff2caf497fa93a635fbf5872321
+Origname: gcr-4.3.0
+Name: gcr
+
+    gcr 4.3.0 (GCR, cryptographic UI + certificate widgets; gcr-4 API needed by gnome-shell 46). Newest stable 4.3.x line at GNOME 46 time (4.3.90+/4.4 are GNOME 47 dev releases).

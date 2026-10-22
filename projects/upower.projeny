@@ -1,0 +1,5 @@
+URL: https://deb.debian.org/debian/pool/main/u/upower/upower_1.90.9.orig.tar.bz2 e4912d7ed183ffdc32991a13db8a0931822863f4b9b64dc1e25494edbfc33d17
+Origname: upower-v1.90.9
+Name: upower
+
+    upower 1.90.9 (power/battery status D-Bus service; gnome-shell's system status menus use its org.freedesktop.UPower API). freedesktop.org only hosts up to 0.99.x; the Debian pool orig tarball (root dir upower-v1.90.9) is the canonical tarball.

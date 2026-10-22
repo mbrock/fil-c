@@ -1,0 +1,6 @@
+URL: https://download.gnome.org/sources/libgweather/4.4/libgweather-4.4.4.tar.xz e71ce50ddfd2856be95e5d840258063e0080de8d7bbd9abe368cb1a8e4b1912a
+URL: https://ftp.gnome.org/pub/GNOME/sources/libgweather/4.4/libgweather-4.4.4.tar.xz e71ce50ddfd2856be95e5d840258063e0080de8d7bbd9abe368cb1a8e4b1912a
+Origname: libgweather-4.4.4
+Name: libgweather
+
+    libgweather 4.4.4 (weather/timezone/locations database; gnome-shell's date menu and weather widget link libgweather-4). Requires geocode-glib.
