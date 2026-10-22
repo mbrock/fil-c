@@ -4033,9 +4033,9 @@ PAS_API PAS_NO_RETURN void filc_stack_overflow_failure_impl(void);
 /* Payload copies and fills of at least this many bytes go to libc. The byte loops below take a
    cycle or more per byte, which made them a measurable share of PHP's run time (strspn masks,
    hash table resizes, array copies). Only payload bytes are moved here; capabilities live in aux
-   and are copied separately afterwards, so the store granularity does not matter for safety.
-   Callers bound these sizes by FILC_MAX_BYTES_BETWEEN_POLLCHECKS, so the libc call is as short as
-   the loop it replaces. */
+   and are handled separately afterwards, and the byte loops never made payload words atomic, so
+   the store granularity does not matter for safety. libc does not exit or pollcheck, so each
+   caller's exit policy is unchanged. */
 #define FILC_SMALL_MEMOP_LIBC_THRESHOLD 16
 
 static PAS_ALWAYS_INLINE void filc_memset_small(void* ptr, unsigned value, size_t bytes)
