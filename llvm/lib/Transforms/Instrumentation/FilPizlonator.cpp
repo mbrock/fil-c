@@ -63,6 +63,11 @@ static cl::opt<bool> frameAliasScope(
   "filc-frame-alias-scope",
   cl::desc("Tell alias analysis that Fil-C frame accesses do not alias other loads and stores"),
   cl::Hidden, cl::init(true));
+static cl::opt<bool> shareDerivedLowers(
+  "filc-share-derived-lowers",
+  cl::desc("Root pointers derived from another pointer (GEPs, casts, phis and selects whose "
+           "inputs all derive from it) through that pointer's frame slot"),
+  cl::Hidden, cl::init(true));
 static cl::opt<bool> propagateChecksBackward(
   "filc-propagate-checks-backward", cl::desc("Perform backward propagation of checks"),
   cl::Hidden, cl::init(true));
@@ -2915,6 +2920,98 @@ class Pizlonator {
     return false;
   }
 
+  // A pointer's lower is the lower of the pointer it was derived from by a GEP or a cast, and a
+  // phi or select whose inputs all have the same lower has that lower too. Such a derived pointer
+  // needs no frame slot of its own: keeping the pointer it derives from (its lower root) live
+  // wherever the derived pointer is live keeps the object rooted. Without this, a pointer that
+  // walks an array in a loop gets its lower recorded again on every iteration, into the slots of
+  // the loop phi and of the incremented pointer, even though the lower never changes.
+  //
+  // A phi only takes the lower root R of its inputs when R strictly dominates the phi's block (or
+  // is an argument). Otherwise R may be defined in the same loop as the phi, and the phi would see
+  // R's lower from the previous iteration, which may differ. Roots are instructions or arguments,
+  // never constants, and every root dominates the values rooted through it, so the root chains
+  // are acyclic. Unreachable blocks are left alone because dominance there is vacuous.
+  std::unordered_map<Value*, Value*> LowerRoots;
+
+  Value* lowerRoot(Value* V) {
+    for (;;) {
+      auto It = LowerRoots.find(V);
+      if (It == LowerRoots.end() || It->second == V)
+        return V;
+      V = It->second;
+    }
+  }
+
+  void computeLowerRoots(const std::vector<BasicBlock*>& Blocks) {
+    LowerRoots.clear();
+    if (!shareDerivedLowers)
+      return;
+    DominatorTree DT(*Blocks[0]->getParent());
+    auto Eligible = [&] (Value* V) -> bool {
+      return (isa<Instruction>(V) || isa<Argument>(V)) && V->getType() == RawPtrTy
+        && underlyingPointerKind(V) == PointerKind::Escaping;
+    };
+    bool Changed = true;
+    while (Changed) {
+      Changed = false;
+      for (BasicBlock* BB : Blocks) {
+        // Values in unreachable blocks keep their own slots. Dominance treats them as dominated,
+        // which would let the iteration flip roots back and forth forever.
+        if (!DT.isReachableFromEntry(BB))
+          continue;
+        for (Instruction& I : *BB) {
+          if (!Eligible(&I))
+            continue;
+          Value* Root = &I;
+          if (isa<GetElementPtrInst>(&I) || isa<BitCastInst>(&I) || isa<AddrSpaceCastInst>(&I)) {
+            Value* Base = lowerRoot(I.getOperand(0));
+            if (Eligible(Base))
+              Root = Base;
+          } else if (isa<PHINode>(&I) || isa<SelectInst>(&I)) {
+            Value* Common = nullptr;
+            bool Mixed = false;
+            auto Consider = [&] (Value* In) {
+              Value* R = lowerRoot(In);
+              if (R == &I)
+                return;
+              if (!Common)
+                Common = R;
+              else if (Common != R)
+                Mixed = true;
+            };
+            if (PHINode* Phi = dyn_cast<PHINode>(&I)) {
+              for (Value* In : Phi->incoming_values())
+                Consider(In);
+            } else {
+              Consider(I.getOperand(1));
+              Consider(I.getOperand(2));
+            }
+            if (Common && !Mixed && Eligible(Common)) {
+              bool Dominates = true;
+              if (Instruction* CI = dyn_cast<Instruction>(Common)) {
+                Dominates = isa<SelectInst>(&I)
+                  ? DT.dominates(CI, &I)
+                  : (CI->getParent() != BB && DT.dominates(CI, BB));
+              }
+              if (Dominates)
+                Root = Common;
+            }
+          }
+          Value*& Slot = LowerRoots[&I];
+          if (Slot != Root) {
+            Slot = Root;
+            Changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  bool hasOwnLower(Value* V) {
+    return lowerRoot(V) == V;
+  }
+
   void computeFrameIndexMap(const std::vector<BasicBlock*>& Blocks) {
     assert(FrameSize == SIZE_MAX);
     assert(NumStackAuxes == SIZE_MAX);
@@ -2927,7 +3024,10 @@ class Pizlonator {
 
     assert(!Blocks.empty());
 
+    computeLowerRoots(Blocks);
+
     auto LiveCast = [&] (Value* V) -> Value* {
+      V = lowerRoot(V);
       if (underlyingPointerKind(V) != PointerKind::Escaping)
         return nullptr;
       if (isa<Instruction>(V))
@@ -3074,7 +3174,8 @@ class Pizlonator {
           }
         } else {
           Live.erase(I);
-          Defined = I;
+          if (hasOwnLower(I))
+            Defined = I;
           auto Iter = RootAlwaysLiveIndex.find(I);
           if (Iter != RootAlwaysLiveIndex.end()) {
             assert(Iter->second + 1 == NumLiveRootAlwaysLive);
@@ -3155,7 +3256,8 @@ class Pizlonator {
       for (Instruction& I : *BB) {
         Value* UP = underlyingPtr(&I).P;
         PointerKind PK = pointerKindDirect(UP);
-        if ((PK == PointerKind::LocalNaked || PK == PointerKind::LocalExplicit) && UP != &I)
+        if (((PK == PointerKind::LocalNaked || PK == PointerKind::LocalExplicit) && UP != &I)
+            || !hasOwnLower(&I))
           FrameIndexMap[ValuePtr(&I, 0)] = FrameEntry(FrameEntryKind::Ignored, 0);
         else {
           for (size_t PtrIndex = countPtrsForValue(&I); PtrIndex--;)
