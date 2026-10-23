@@ -8045,10 +8045,11 @@ filc_jmp_buf* filc_jmp_buf_recreate(filc_thread* my_thread, filc_jmp_buf** jmp_b
         result->num_lowers ==
         filc_origin_get_function_origin(result->saved_top_frame->origin)->base.num_lowers_ish);
 
-    if ((kind == filc_jmp_buf_sigsetjmp && value) ||
-        (kind == filc_jmp_buf_setjmp && setjmp_saves_sigmask)) {
+    result->did_save_sigmask =
+        (kind == filc_jmp_buf_sigsetjmp && value) ||
+        (kind == filc_jmp_buf_setjmp && setjmp_saves_sigmask);
+    if (result->did_save_sigmask) {
         PAS_ASSERT(!pthread_sigmask(0, NULL, &result->sigmask));
-        result->did_save_sigmask = true;
     }
 
     if (verbose) {
@@ -15988,4 +15989,3 @@ PAS_END_EXTERN_C;
 #endif /* PAS_ENABLE_FILC */
 
 #endif /* LIBPAS_ENABLED */
-

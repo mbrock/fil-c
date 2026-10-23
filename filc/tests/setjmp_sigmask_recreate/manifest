@@ -1,0 +1,7 @@
+return:
+  success
+output-includes:
+  - "sigsetjmp 1->0: 0"
+  - "sigsetjmp 0->1: 1"
+  - "setjmp 1->0: 0"
+  - "setjmp 0->1: 1"
