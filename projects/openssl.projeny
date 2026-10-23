@@ -29,16 +29,29 @@ diff --git a/openssl/crypto/aes/aes_asm_forward.c b/openssl/crypto/aes/aes_asm_f
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/aes/aes_asm_forward.c
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,83 @@
 +#include "internal/deprecated.h"
 +
 +#include <assert.h>
 +
 +#include <stdlib.h>
++#include <stdint.h>
 +#include <openssl/crypto.h>
 +#include <openssl/aes.h>
 +#include "aes_local.h"
 +#include <stdfil.h>
++
++/* The assembly reads key->rounds to know how many round keys to load;
++   AES_cbc_encrypt can read it again for every block, so out must not overlap
++   the key. */
++static void check_key(const AES_KEY *key, const unsigned char *out, size_t len)
++{
++    uintptr_t o = (uintptr_t)out, k = (uintptr_t)key;
++
++    zcheck_readonly(key, sizeof(AES_KEY));
++    ZSAFETY_CHECK(key->rounds == 10 || key->rounds == 12 || key->rounds == 14);
++    ZSAFETY_CHECK(o >= k + sizeof(AES_KEY) || k >= o + len);
++}
 +
 +int AES_set_encrypt_key(const unsigned char *userKey, const int bits,
 +                        AES_KEY *key)
@@ -48,12 +61,22 @@ new file mode 100644
 +    return zunsafe_buf_call(bits, "AES_set_encrypt_key", userKey, bits, key);
 +}
 +
++/* The assembly stores the number of rounds in the key and reads it back to
++   invert the schedule in place, so it is given a private key that no other
++   thread can change, copied out afterwards. */
 +int AES_set_decrypt_key(const unsigned char *userKey, const int bits,
 +                        AES_KEY *key)
 +{
++    AES_KEY k;
++    int ret;
++
 +    zcheck_readonly(userKey, zchecked_add(bits, 7) / 8);
 +    zcheck(key, sizeof(AES_KEY));
-+    return zunsafe_buf_call(bits, "AES_set_decrypt_key", userKey, bits, key);
++    ret = zunsafe_buf_call(bits, "AES_set_decrypt_key", userKey, bits, &k);
++    if (ret == 0)
++        *key = k;
++    OPENSSL_cleanse(&k, sizeof(k));
++    return ret;
 +}
 +
 +void AES_encrypt(const unsigned char *in, unsigned char *out,
@@ -61,7 +84,7 @@ new file mode 100644
 +{
 +    zcheck_readonly(in, 16);
 +    zcheck(out, 16);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, 16);
 +    zunsafe_fast_call("AES_encrypt", in, out, key);
 +}
 +
@@ -70,7 +93,7 @@ new file mode 100644
 +{
 +    zcheck_readonly(in, 16);
 +    zcheck(out, 16);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, 16);
 +    zunsafe_fast_call("AES_decrypt", in, out, key);
 +}
 +
@@ -78,9 +101,15 @@ new file mode 100644
 +                     size_t length, const AES_KEY *key,
 +                     unsigned char *ivp, const int enc)
 +{
-+    zcheck_readonly(in, length);
-+    zcheck(out, length);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    /* The assembly treats a partial last block as a whole one: encrypting, it
++       pads it with zeros in out; decrypting, it reads a whole block from in. */
++    size_t padded = zchecked_add(length, 15) & ~(size_t)15;
++
++    if (length == 0)
++        return;
++    zcheck_readonly(in, enc ? length : padded);
++    zcheck(out, enc ? padded : length);
++    check_key(key, out, enc ? padded : length);
 +    zcheck(ivp, 16);
 +    zunsafe_buf_call(length, "AES_cbc_encrypt", in, out, length, key, ivp, enc);
 +}
@@ -259,21 +288,39 @@ diff --git a/openssl/crypto/aes/aesni_asm_forward.c b/openssl/crypto/aes/aesni_a
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/aes/aesni_asm_forward.c
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,239 @@
 +#include "internal/deprecated.h"
 +
 +#include <assert.h>
 +
 +#include <stdlib.h>
++#include <stdint.h>
 +#include <openssl/crypto.h>
 +#include <openssl/aes.h>
 +#include "crypto/modes.h"
 +#include "crypto/aes_platform.h"
 +#include <stdfil.h>
 +
++/* The assembly takes the number of round keys to read from the key itself,
++   aesni_ccm64_decrypt_blocks again after it has stored to out, so out must
++   not overlap the key. */
++static void check_key(const void *key, const unsigned char *out, size_t len)
++{
++    const AES_KEY *k = key;
++    uintptr_t o = (uintptr_t)out, s = (uintptr_t)key;
++
++    zcheck_readonly(k, sizeof(AES_KEY));
++    ZSAFETY_CHECK(k->rounds == 9 || k->rounds == 11 || k->rounds == 13);
++    ZSAFETY_CHECK(o >= s + sizeof(AES_KEY) || s >= o + len);
++}
++
++/* The set_key routines return -2 unless bits is 128, 192 or 256, but load 16
++   bytes from userKey before they look at bits. */
 +int aesni_set_encrypt_key(const unsigned char *userKey, int bits,
 +                          AES_KEY *key)
 +{
++    if (bits != 128 && bits != 192 && bits != 256)
++        return -2;
 +    zcheck_readonly(userKey, zchecked_add(bits, 7) / 8);
 +    zcheck(key, sizeof(AES_KEY));
 +    return zunsafe_buf_call(bits, "aesni_set_encrypt_key", userKey, bits, key);
@@ -282,6 +329,8 @@ new file mode 100644
 +int aesni_set_decrypt_key(const unsigned char *userKey, int bits,
 +                          AES_KEY *key)
 +{
++    if (bits != 128 && bits != 192 && bits != 256)
++        return -2;
 +    zcheck_readonly(userKey, zchecked_add(bits, 7) / 8);
 +    zcheck(key, sizeof(AES_KEY));
 +    return zunsafe_buf_call(bits, "aesni_set_decrypt_key", userKey, bits, key);
@@ -292,7 +341,7 @@ new file mode 100644
 +{
 +    zcheck_readonly(in, 16);
 +    zcheck(out, 16);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, 16);
 +    zunsafe_fast_call("aesni_encrypt", in, out, key);
 +}
 +
@@ -301,7 +350,7 @@ new file mode 100644
 +{
 +    zcheck_readonly(in, 16);
 +    zcheck(out, 16);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, 16);
 +    zunsafe_fast_call("aesni_decrypt", in, out, key);
 +}
 +
@@ -311,7 +360,7 @@ new file mode 100644
 +{
 +    zcheck_readonly(in, length);
 +    zcheck(out, length);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, length);
 +    zunsafe_buf_call(length, "aesni_ecb_encrypt", in, out, length, key, enc);
 +}
 +
@@ -320,9 +369,14 @@ new file mode 100644
 +                       size_t length,
 +                       const AES_KEY *key, unsigned char *ivec, int enc)
 +{
-+    zcheck_readonly(in, length);
-+    zcheck(out, length);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    /* The assembly handles a partial last block of t bytes as a whole one:
++       encrypting, it stores all 16 bytes to out; decrypting, it reads all 16
++       from in and stores 16 - t. */
++    size_t padded = zchecked_add(length, 15) & ~(size_t)15;
++
++    zcheck_readonly(in, enc ? length : padded);
++    zcheck(out, padded);
++    check_key(key, out, padded);
 +    zcheck(ivec, 16);
 +    zunsafe_buf_call(length, "aesni_cbc_encrypt", in, out, length, key, ivec, enc);
 +}
@@ -338,6 +392,15 @@ new file mode 100644
 +    return result;
 +}
 +
++/* The assembly reads the L_ entry of every block, which is the one indexed by
++   the number of trailing zero bits in the block's number, up to two blocks
++   past the last one (ocb128.c computes those too). */
++static size_t l_bytes(size_t blocks, size_t start_block_num)
++{
++    size_t entries = zchecked_add(l_size(zchecked_add(blocks, 2), start_block_num), 1);
++    return zchecked_mul(16, entries);
++}
++
 +void aesni_ocb_encrypt(const unsigned char *in, unsigned char *out,
 +                       size_t blocks, const void *key,
 +                       size_t start_block_num,
@@ -345,11 +408,17 @@ new file mode 100644
 +                       const unsigned char L_[][16],
 +                       unsigned char checksum[16])
 +{
++    /* Given no blocks and an even start_block_num, the assembly would still
++       process one and then count down from zero, so never stop. Blocks are
++       numbered from 1. */
++    if (blocks == 0)
++        return;
++    ZSAFETY_CHECK(start_block_num >= 1);
 +    zcheck_readonly(in, zchecked_mul(blocks, 16));
 +    zcheck(out, zchecked_mul(blocks, 16));
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, zchecked_mul(blocks, 16));
 +    zcheck(offset_i, 16);
-+    zcheck_readonly(L_, zchecked_mul(16, l_size(blocks, start_block_num)));
++    zcheck_readonly(L_, l_bytes(blocks, start_block_num));
 +    zcheck(checksum, 16);
 +    zunsafe_buf_call(blocks, "aesni_ocb_encrypt", in, out, blocks, key, start_block_num, offset_i, L_, checksum);
 +}
@@ -361,11 +430,14 @@ new file mode 100644
 +                       const unsigned char L_[][16],
 +                       unsigned char checksum[16])
 +{
++    if (blocks == 0)
++        return;
++    ZSAFETY_CHECK(start_block_num >= 1);
 +    zcheck_readonly(in, zchecked_mul(blocks, 16));
 +    zcheck(out, zchecked_mul(blocks, 16));
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, zchecked_mul(blocks, 16));
 +    zcheck(offset_i, 16);
-+    zcheck_readonly(L_, zchecked_mul(16, l_size(blocks, start_block_num)));
++    zcheck_readonly(L_, l_bytes(blocks, start_block_num));
 +    zcheck(checksum, 16);
 +    zunsafe_buf_call(blocks, "aesni_ocb_decrypt", in, out, blocks, key, start_block_num, offset_i, L_, checksum);
 +}
@@ -376,9 +448,12 @@ new file mode 100644
 +                                size_t blocks,
 +                                const void *key, const unsigned char *ivec)
 +{
++    /* Given no blocks, the assembly would still process one. */
++    if (blocks == 0)
++        return;
 +    zcheck_readonly(in, zchecked_mul(blocks, 16));
 +    zcheck(out, zchecked_mul(blocks, 16));
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, zchecked_mul(blocks, 16));
 +    zcheck_readonly(ivec, 16);
 +    zunsafe_buf_call(blocks, "aesni_ctr32_encrypt_blocks", in, out, blocks, key, ivec);
 +}
@@ -389,10 +464,15 @@ new file mode 100644
 +                       const AES_KEY *key1, const AES_KEY *key2,
 +                       const unsigned char iv[16])
 +{
++    /* With 1 to 15 bytes the assembly's ciphertext stealing reads and writes
++       the 16 bytes before out; decrypting, its block count goes negative and
++       it runs on. (0 does nothing there; an XTS data unit is at least a
++       block, so it is refused too.) */
++    ZSAFETY_CHECK(length >= 16);
 +    zcheck_readonly(in, length);
 +    zcheck(out, length);
-+    zcheck_readonly(key1, sizeof(AES_KEY));
-+    zcheck_readonly(key2, sizeof(AES_KEY));
++    check_key(key1, out, length);
++    check_key(key2, out, length);
 +    zcheck_readonly(iv, 16);
 +    zunsafe_buf_call(length, "aesni_xts_encrypt", in, out, length, key1, key2, iv);
 +}
@@ -403,10 +483,11 @@ new file mode 100644
 +                       const AES_KEY *key1, const AES_KEY *key2,
 +                       const unsigned char iv[16])
 +{
++    ZSAFETY_CHECK(length >= 16);
 +    zcheck_readonly(in, length);
 +    zcheck(out, length);
-+    zcheck_readonly(key1, sizeof(AES_KEY));
-+    zcheck_readonly(key2, sizeof(AES_KEY));
++    check_key(key1, out, length);
++    check_key(key2, out, length);
 +    zcheck_readonly(iv, 16);
 +    zunsafe_buf_call(length, "aesni_xts_decrypt", in, out, length, key1, key2, iv);
 +}
@@ -418,9 +499,13 @@ new file mode 100644
 +                                const unsigned char ivec[16],
 +                                unsigned char cmac[16])
 +{
++    /* Given no blocks, the assembly would still process one and then count
++       down from zero, so never stop. */
++    if (blocks == 0)
++        return;
 +    zcheck_readonly(in, zchecked_mul(blocks, 16));
 +    zcheck(out, zchecked_mul(blocks, 16));
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, zchecked_mul(blocks, 16));
 +    zcheck_readonly(ivec, 16);
 +    zcheck(cmac, 16);
 +    zunsafe_buf_call(blocks, "aesni_ccm64_encrypt_blocks", in, out, blocks, key, ivec, cmac);
@@ -433,9 +518,11 @@ new file mode 100644
 +                                const unsigned char ivec[16],
 +                                unsigned char cmac[16])
 +{
++    if (blocks == 0)
++        return;
 +    zcheck_readonly(in, zchecked_mul(blocks, 16));
 +    zcheck(out, zchecked_mul(blocks, 16));
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, zchecked_mul(blocks, 16));
 +    zcheck_readonly(ivec, 16);
 +    zcheck(cmac, 16);
 +    zunsafe_buf_call(blocks, "aesni_ccm64_decrypt_blocks", in, out, blocks, key, ivec, cmac);
@@ -445,7 +532,7 @@ diff --git a/openssl/crypto/aes/aesni_mb_asm_forward.c b/openssl/crypto/aes/aesn
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/aes/aesni_mb_asm_forward.c
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,40 @@
 +#include "internal/deprecated.h"
 +
 +#include <assert.h>
@@ -464,27 +551,33 @@ new file mode 100644
 +    u64 iv[2];
 +} CIPH_DESC;
 +
++/* The assembly reads the descriptors itself, so it is given copies that
++   nothing can change once they are checked. */
 +void aesni_multi_cbc_encrypt(CIPH_DESC *desc, void *key, int n4x)
 +{
 +    ZSAFETY_CHECK(n4x == 1 || n4x == 2);
 +    unsigned n = n4x * 4;
-+    zcheck(desc, zchecked_mul(sizeof(CIPH_DESC), n));
++    CIPH_DESC d[8];
 +    unsigned i;
 +    unsigned total = 0;
 +    for (i = n; i--;) {
-+        zcheck_readonly(desc[i].inp, zchecked_mul(desc[i].blocks, 16));
-+        zcheck(desc[i].out, zchecked_mul(desc[i].blocks, 16));
-+        total += zchecked_mul(desc[i].blocks, 16);
++        d[i] = desc[i];
++        zcheck_readonly(d[i].inp, zchecked_mul(d[i].blocks, 16));
++        zcheck(d[i].out, zchecked_mul(d[i].blocks, 16));
++        total += zchecked_mul(d[i].blocks, 16);
 +    }
++    /* No rounds check as in aesni_asm_forward.c's check_key(): the assembly
++       only compares rounds with 11 to choose a fixed 10-, 12- or 14-round
++       path and reads the key at fixed offsets inside the AES_KEY. */
 +    zcheck(key, sizeof(AES_KEY));
-+    zunsafe_buf_call(total, "aesni_multi_cbc_encrypt", desc, key, n4x);
++    zunsafe_buf_call(total, "aesni_multi_cbc_encrypt", d, key, n4x);
 +}
 +
 diff --git a/openssl/crypto/aes/aesni_sha1_asm_forward.c b/openssl/crypto/aes/aesni_sha1_asm_forward.c
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/aes/aesni_sha1_asm_forward.c
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,48 @@
 +#include "internal/deprecated.h"
 +
 +#include <assert.h>
@@ -501,8 +594,15 @@ new file mode 100644
 +                        const AES_KEY *key, unsigned char iv[16],
 +                        SHA_CTX *ctx, const void *in0)
 +{
++    /* Given no blocks, the assembly would still process one and go on from
++       there. */
++    if (blocks == 0)
++        return;
 +    zcheck_readonly(inp, zchecked_mul(blocks, 64));
 +    zcheck(out, zchecked_mul(blocks, 64));
++    /* No rounds check as in aesni_asm_forward.c's check_key(): the assembly
++       only compares rounds with 11 to choose a fixed 10-, 12- or 14-round
++       path and reads the key at fixed offsets inside the AES_KEY. */
 +    zcheck_readonly(key, sizeof(AES_KEY));
 +    zcheck(iv, 16);
 +    zcheck(ctx, sizeof(SHA_CTX));
@@ -530,7 +630,7 @@ diff --git a/openssl/crypto/aes/aesni_sha256_asm_forward.c b/openssl/crypto/aes/
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/aes/aesni_sha256_asm_forward.c
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,36 @@
 +#include "internal/deprecated.h"
 +
 +#include <assert.h>
@@ -547,14 +647,21 @@ new file mode 100644
 +                         const AES_KEY *key, unsigned char iv[16],
 +                         SHA256_CTX *ctx, const void *in0)
 +{
++    /* Without inp the assembly only returns 1 (the caller's probe for the
++       routine) and touches nothing. */
++    if (inp == NULL)
++        return zunsafe_call("aesni_cbc_sha256_enc", inp, out, blocks, key, iv, ctx, in0);
++    /* Given no blocks, it would still process one or two, and on the SHA
++       extensions path go on from there. */
++    if (blocks == 0)
++        return 1;
 +    zcheck_readonly(inp, zchecked_mul(blocks, 64));
 +    zcheck(out, zchecked_mul(blocks, 64));
-+    if (key)
-+        zcheck_readonly(key, sizeof(AES_KEY));
-+    if (iv)
-+        zcheck(iv, 16);
-+    if (ctx)
-+        zcheck(ctx, sizeof(SHA256_CTX));
++    zcheck_readonly(key, sizeof(AES_KEY));
++    /* The AVX, AVX2 and XOP paths index a table of masks with key->rounds. */
++    ZSAFETY_CHECK(key->rounds == 9 || key->rounds == 11 || key->rounds == 13);
++    zcheck(iv, 16);
++    zcheck(ctx, sizeof(SHA256_CTX));
 +    zcheck_readonly(in0, zchecked_mul(blocks, 64));
 +    return zunsafe_call("aesni_cbc_sha256_enc", inp, out, blocks, key, iv, ctx, in0);
 +}
@@ -564,7 +671,7 @@ diff --git a/openssl/crypto/aes/aesni_xts_avx512_asm_forward.c b/openssl/crypto/
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/aes/aesni_xts_avx512_asm_forward.c
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,70 @@
 +#include "internal/deprecated.h"
 +
 +#include <assert.h>
@@ -581,6 +688,9 @@ new file mode 100644
 +    return zunsafe_fast_call("aesni_xts_avx512_eligible");
 +}
 +
++/* No len >= 16 check and no check_key(), unlike aesni_asm_forward.c: for a
++   len under 16 these four routines return without touching in or out, and
++   they read both keys only at fixed offsets inside the AES_KEY. */
 +void aesni_xts_128_encrypt_avx512(const unsigned char *in, unsigned char *out,
 +                                  size_t len, const AES_KEY *key1,
 +                                  const AES_KEY *key2,
@@ -636,25 +746,42 @@ diff --git a/openssl/crypto/aes/bsaes_asm_forward.c b/openssl/crypto/aes/bsaes_a
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/aes/bsaes_asm_forward.c
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,85 @@
 +#include "internal/deprecated.h"
 +
 +#include <assert.h>
 +
 +#include <stdlib.h>
++#include <stdint.h>
 +#include <openssl/crypto.h>
 +#include <openssl/aes.h>
 +#include "crypto/modes.h"
 +#include "crypto/aes_platform.h"
 +#include <stdfil.h>
 +
++/* The assembly sizes its stack frame by key->rounds, and reads it again for
++   each block it leaves to AES_encrypt or AES_decrypt, so out must not overlap
++   the key. */
++static void check_key(const AES_KEY *key, const unsigned char *out, size_t len)
++{
++    uintptr_t o = (uintptr_t)out, k = (uintptr_t)key;
++
++    zcheck_readonly(key, sizeof(AES_KEY));
++    ZSAFETY_CHECK(key->rounds == 10 || key->rounds == 12 || key->rounds == 14);
++    ZSAFETY_CHECK(o >= k + sizeof(AES_KEY) || k >= o + len);
++}
++
 +void ossl_bsaes_cbc_encrypt(const unsigned char *in, unsigned char *out,
 +                            size_t length, const AES_KEY *key,
 +                            unsigned char ivec[16], int enc)
 +{
-+    zcheck_readonly(in, length);
-+    zcheck(out, length);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    /* To encrypt, and to decrypt fewer than 128 bytes, the assembly jumps to
++       AES_cbc_encrypt, which treats a partial last block as a whole one. */
++    size_t padded = zchecked_add(length, 15) & ~(size_t)15;
++
++    zcheck_readonly(in, (enc || length >= 128) ? length : padded);
++    zcheck(out, enc ? padded : length);
++    check_key(key, out, enc ? padded : length);
 +    zcheck(ivec, 16);
 +    zunsafe_buf_call(length, "ossl_bsaes_cbc_encrypt", in, out, length, key, ivec, enc);
 +}
@@ -664,9 +791,13 @@ new file mode 100644
 +                                     const AES_KEY *key,
 +                                     const unsigned char ivec[16])
 +{
++    /* Given no blocks, the assembly would still process one and then count
++       down from zero, so never stop. */
++    if (len == 0)
++        return;
 +    zcheck_readonly(in, zchecked_mul(len, 16));
 +    zcheck(out, zchecked_mul(len, 16));
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, zchecked_mul(len, 16));
 +    zcheck_readonly(ivec, 16);
 +    zunsafe_buf_call(len, "ossl_bsaes_ctr32_encrypt_blocks", in, out, len, key, ivec);
 +}
@@ -675,10 +806,15 @@ new file mode 100644
 +                            size_t len, const AES_KEY *key1,
 +                            const AES_KEY *key2, const unsigned char iv[16])
 +{
++    /* With 1 to 15 bytes the assembly's ciphertext stealing reads and writes
++       the 16 bytes before out; decrypting, its block count goes negative and
++       it runs on. (0 does nothing there; an XTS data unit is at least a
++       block, so it is refused too.) */
++    ZSAFETY_CHECK(len >= 16);
 +    zcheck_readonly(inp, len);
 +    zcheck(out, len);
-+    zcheck_readonly(key1, sizeof(AES_KEY));
-+    zcheck_readonly(key2, sizeof(AES_KEY));
++    check_key(key1, out, len);
++    check_key(key2, out, len);
 +    zcheck_readonly(iv, 16);
 +    zunsafe_buf_call(len, "ossl_bsaes_xts_encrypt", inp, out, len, key1, key2, iv);
 +}
@@ -687,10 +823,11 @@ new file mode 100644
 +                            size_t len, const AES_KEY *key1,
 +                            const AES_KEY *key2, const unsigned char iv[16])
 +{
++    ZSAFETY_CHECK(len >= 16);
 +    zcheck_readonly(inp, len);
 +    zcheck(out, len);
-+    zcheck_readonly(key1, sizeof(AES_KEY));
-+    zcheck_readonly(key2, sizeof(AES_KEY));
++    check_key(key1, out, len);
++    check_key(key2, out, len);
 +    zcheck_readonly(iv, 16);
 +    zunsafe_buf_call(len, "ossl_bsaes_xts_decrypt", inp, out, len, key1, key2, iv);
 +}
@@ -750,21 +887,38 @@ diff --git a/openssl/crypto/aes/vpaes_asm_forward.c b/openssl/crypto/aes/vpaes_a
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/aes/vpaes_asm_forward.c
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,73 @@
 +#include "internal/deprecated.h"
 +
 +#include <assert.h>
 +
 +#include <stdlib.h>
++#include <stdint.h>
 +#include <openssl/crypto.h>
 +#include <openssl/aes.h>
 +#include "crypto/modes.h"
 +#include "crypto/aes_platform.h"
 +#include <stdfil.h>
 +
++/* The assembly reads key->rounds to know how many round keys to load;
++   vpaes_cbc_encrypt reads it again for every block, so out must not overlap
++   the key. */
++static void check_key(const AES_KEY *key, const unsigned char *out, size_t len)
++{
++    uintptr_t o = (uintptr_t)out, k = (uintptr_t)key;
++
++    zcheck_readonly(key, sizeof(AES_KEY));
++    ZSAFETY_CHECK(key->rounds == 9 || key->rounds == 11 || key->rounds == 13);
++    ZSAFETY_CHECK(o >= k + sizeof(AES_KEY) || k >= o + len);
++}
++
++/* Neither set_key routine validates bits: both load 16 bytes of userKey first,
++   and vpaes_set_decrypt_key starts writing at an offset into key computed
++   from it. */
 +int vpaes_set_encrypt_key(const unsigned char *userKey, const int bits,
 +                          AES_KEY *key)
 +{
++    ZSAFETY_CHECK(bits == 128 || bits == 192 || bits == 256);
 +    zcheck_readonly(userKey, zchecked_add(bits, 7) / 8);
 +    zcheck(key, sizeof(AES_KEY));
 +    return zunsafe_buf_call(bits, "vpaes_set_encrypt_key", userKey, bits, key);
@@ -773,6 +927,7 @@ new file mode 100644
 +int vpaes_set_decrypt_key(const unsigned char *userKey, const int bits,
 +                          AES_KEY *key)
 +{
++    ZSAFETY_CHECK(bits == 128 || bits == 192 || bits == 256);
 +    zcheck_readonly(userKey, zchecked_add(bits, 7) / 8);
 +    zcheck(key, sizeof(AES_KEY));
 +    return zunsafe_buf_call(bits, "vpaes_set_decrypt_key", userKey, bits, key);
@@ -783,7 +938,7 @@ new file mode 100644
 +{
 +    zcheck_readonly(in, 16);
 +    zcheck(out, 16);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, 16);
 +    zunsafe_fast_call("vpaes_encrypt", in, out, key);
 +}
 +
@@ -792,7 +947,7 @@ new file mode 100644
 +{
 +    zcheck_readonly(in, 16);
 +    zcheck(out, 16);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, 16);
 +    zunsafe_fast_call("vpaes_decrypt", in, out, key);
 +}
 +
@@ -802,7 +957,7 @@ new file mode 100644
 +{
 +    zcheck_readonly(in, length);
 +    zcheck(out, length);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, length);
 +    zcheck(ivp, 16);
 +    zunsafe_buf_call(length, "vpaes_cbc_encrypt", in, out, length, key, ivp, enc);
 +}
@@ -1086,7 +1241,7 @@ diff --git a/openssl/crypto/bn/bn_asm.c b/openssl/crypto/bn/bn_asm.c
 
  #if defined(BN_LLONG) || defined(BN_UMULT_HIGH)
 
-@@ -1079,3 +1080,16 @@
+@@ -1079,3 +1080,21 @@
  #endif
 
  #endif /* !BN_MUL_COMBA */
@@ -1095,6 +1250,11 @@ diff --git a/openssl/crypto/bn/bn_asm.c b/openssl/crypto/bn/bn_asm.c
 +int bn_mul_mont(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,
 +                const BN_ULONG *np, const BN_ULONG *n0, int num)
 +{
++    /* The assembly needs at least two words and makes a stack buffer of a
++       few times num words; outside bn_mont.c's range a zero return leaves
++       the multiplication to the caller's C code. */
++    if (num < 2 || num > BN_SOFT_LIMIT)
++        return 0;
 +    zcheck(rp, zchecked_mul(num, sizeof(BN_ULONG)));
 +    zcheck_readonly(ap, zchecked_mul(num, sizeof(BN_ULONG)));
 +    zcheck_readonly(bp, zchecked_mul(num, sizeof(BN_ULONG)));
@@ -1180,7 +1340,7 @@ diff --git a/openssl/crypto/camellia/camellia_asm_forward.c b/openssl/crypto/cam
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/camellia/camellia_asm_forward.c
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,79 @@
 +#include "internal/deprecated.h"
 +
 +#include <openssl/camellia.h>
@@ -1198,10 +1358,14 @@ new file mode 100644
 +    return zunsafe_fast_call("Camellia_Ekeygen", keyBitLength, rawKey, k);
 +}
 +
++/* The assembly reads 64 bytes of the key table per grand round and 16 more,
++   and stops only on reaching exactly grandRounds of them: 4 is the most the
++   table holds, and 0 would never stop. */
 +void Camellia_EncryptBlock_Rounds(int grandRounds, const u8 plaintext[],
 +                                  const KEY_TABLE_TYPE keyTable,
 +                                  u8 ciphertext[])
 +{
++    ZSAFETY_CHECK(grandRounds == 3 || grandRounds == 4);
 +    zcheck_readonly(plaintext, 16);
 +    zcheck_readonly(keyTable, sizeof(KEY_TABLE_TYPE));
 +    zcheck(ciphertext, 16);
@@ -1222,6 +1386,7 @@ new file mode 100644
 +                                  const KEY_TABLE_TYPE keyTable,
 +                                  u8 plaintext[])
 +{
++    ZSAFETY_CHECK(grandRounds == 3 || grandRounds == 4);
 +    zcheck_readonly(ciphertext, 16);
 +    zcheck_readonly(keyTable, sizeof(KEY_TABLE_TYPE));
 +    zcheck(plaintext, 16);
@@ -1242,9 +1407,16 @@ new file mode 100644
 +                          size_t len, const CAMELLIA_KEY *key,
 +                          unsigned char *ivec, const int enc)
 +{
-+    zcheck_readonly(in, len);
-+    zcheck(out, len);
++    /* The assembly treats a partial last block as a whole one: encrypting, it
++       stores all of it to out; decrypting, it reads all of it from in. */
++    size_t padded = zchecked_add(len, 15) & ~(size_t)15;
++
++    if (len == 0)
++        return;
++    zcheck_readonly(in, enc ? len : padded);
++    zcheck(out, enc ? padded : len);
 +    zcheck_readonly(key, sizeof(CAMELLIA_KEY));
++    ZSAFETY_CHECK(key->grand_rounds == 3 || key->grand_rounds == 4);
 +    zcheck(ivec, 16);
 +    zunsafe_buf_call(len, "Camellia_cbc_encrypt", in, out, len, key, ivec, enc);
 +}
@@ -1685,7 +1857,7 @@ diff --git a/openssl/crypto/ec/ecp_nistz256.c b/openssl/crypto/ec/ecp_nistz256.c
 
  typedef unsigned short u16;
 
-@@ -87,47 +89,120 @@
+@@ -87,47 +89,125 @@
   * in all cases so far...
   */
  /* Modular add: res = a+b mod P   */
@@ -1808,6 +1980,10 @@ diff --git a/openssl/crypto/ec/ecp_nistz256.c b/openssl/crypto/ec/ecp_nistz256.c
 +static void ecp_nistz256_scatter_w5(P256_POINT *val,
 +                                    const P256_POINT *in_t, int idx)
 +{
++    /* The scatter routines compute the store offset from idx in 32 bits and
++       zero-extend it, which equals the pointer arithmetic below only for an
++       idx in range. */
++    ZSAFETY_CHECK(idx >= 1 && idx <= 16);
 +    zcheck_readonly(in_t, sizeof(P256_POINT));
 +    zcheck(val + idx - 1, sizeof(P256_POINT));
 +    zunsafe_fast_call("ecp_nistz256_scatter_w5", val, in_t, idx);
@@ -1822,6 +1998,7 @@ diff --git a/openssl/crypto/ec/ecp_nistz256.c b/openssl/crypto/ec/ecp_nistz256.c
 +static void ecp_nistz256_scatter_w7(P256_POINT_AFFINE *val,
 +                                    const P256_POINT_AFFINE *in_t, int idx)
 +{
++    ZSAFETY_CHECK(idx >= 0 && idx <= 63);
 +    zcheck_readonly(in_t, sizeof(P256_POINT_AFFINE));
 +    zcheck(val + idx, sizeof(P256_POINT_AFFINE));
 +    zunsafe_fast_call("ecp_nistz256_scatter_w7", val, in_t, idx);
@@ -1836,7 +2013,7 @@ diff --git a/openssl/crypto/ec/ecp_nistz256.c b/openssl/crypto/ec/ecp_nistz256.c
 
  /* One converted into the Montgomery domain */
  static const BN_ULONG ONE[P256_LIMBS] = {
-@@ -140,6 +215,43 @@
+@@ -140,6 +220,43 @@
  /* Precomputed tables for the default generator */
  extern const PRECOMP256_ROW ecp_nistz256_precomputed[37];
 
@@ -1880,7 +2057,7 @@ diff --git a/openssl/crypto/ec/ecp_nistz256.c b/openssl/crypto/ec/ecp_nistz256.c
  /* Recode window to a signed digit, see ecp_nistputil.c for details */
  static unsigned int _booth_recode_w5(unsigned int in)
  {
-@@ -246,12 +358,29 @@
+@@ -246,12 +363,29 @@
   * ecp_nistz256 module is ECP_NISTZ256_ASM.)
   */
  #ifndef ECP_NISTZ256_REFERENCE_IMPLEMENTATION
@@ -1916,7 +2093,7 @@ diff --git a/openssl/crypto/ec/ecp_nistz256.c b/openssl/crypto/ec/ecp_nistz256.c
  #else
  /* Point double: r = 2*a */
  static void ecp_nistz256_point_double(P256_POINT *r, const P256_POINT *a)
-@@ -998,7 +1127,15 @@
+@@ -998,7 +1132,15 @@
               * is because applications, such as Apache, do not use
               * EC_KEY_precompute_mult.
               */
@@ -1932,7 +2109,7 @@ diff --git a/openssl/crypto/ec/ecp_nistz256.c b/openssl/crypto/ec/ecp_nistz256.c
          }
 
          if (preComputedTable) {
-@@ -1250,12 +1387,23 @@
+@@ -1250,12 +1392,26 @@
  /*
   * Montgomery mul modulo Order(P): res = a*b*2^-256 mod Order(P)
   */
@@ -1955,6 +2132,9 @@ diff --git a/openssl/crypto/ec/ecp_nistz256.c b/openssl/crypto/ec/ecp_nistz256.c
 +                                      const BN_ULONG a[P256_LIMBS],
 +                                      BN_ULONG rep)
 +{
++    /* Given no repetitions, the assembly would square once and count down
++       from there. */
++    ZSAFETY_CHECK(rep >= 1);
 +    zcheck(res, P256_BYTES);
 +    zcheck_readonly(a, P256_BYTES);
 +    zunsafe_fast_call("ecp_nistz256_ord_sqr_mont", res, a, rep);
@@ -2108,13 +2288,17 @@ diff --git a/openssl/crypto/evp/e_aes_cbc_hmac_sha1.c b/openssl/crypto/evp/e_aes
 
  typedef struct {
      AES_KEY ks;
-@@ -97,7 +98,12 @@
+@@ -97,7 +98,16 @@
  #define aes_off 0
  #endif
 
 -void sha1_block_data_order(void *c, const void *p, size_t len);
 +void sha1_block_data_order(void *c, const void *p, size_t len)
 +{
++    /* Given no blocks, the assembly would still process one and go on from
++       there. */
++    if (len == 0)
++        return;
 +    zcheck(c, sizeof(SHA_CTX));
 +    zcheck_readonly(p, zchecked_mul(len, SHA_CBLOCK));
 +    zunsafe_buf_call(zchecked_mul(len, SHA_CBLOCK), "sha1_block_data_order", c, p, len);
@@ -2122,24 +2306,27 @@ diff --git a/openssl/crypto/evp/e_aes_cbc_hmac_sha1.c b/openssl/crypto/evp/e_aes
 
  static void sha1_update(SHA_CTX *c, const void *data, size_t len)
  {
-@@ -145,7 +151,20 @@
+@@ -145,7 +155,23 @@
      int blocks;
  } HASH_DESC;
 
 -void sha1_multi_block(SHA1_MB_CTX *, const HASH_DESC *, int);
++/* The assembly reads the descriptors itself, so it is given copies that
++   nothing can change once they are checked. */
 +void sha1_multi_block(SHA1_MB_CTX *ctx, const HASH_DESC *inp, int n4x)
 +{
 +    zcheck(ctx, sizeof(SHA1_MB_CTX));
 +    ZSAFETY_CHECK(n4x == 1 || n4x == 2);
 +    unsigned len = n4x * 4;
-+    zcheck_readonly(inp, zchecked_mul(len, sizeof(HASH_DESC)));
++    HASH_DESC d[8];
 +    unsigned i;
 +    unsigned total = 0;
 +    for (i = len; i--;) {
-+        zcheck_readonly(inp[i].ptr, zchecked_mul(inp[i].blocks, 64));
-+        total += zchecked_mul(inp[i].blocks, 64);
++        d[i] = inp[i];
++        zcheck_readonly(d[i].ptr, zchecked_mul(d[i].blocks, 64));
++        total += zchecked_mul(d[i].blocks, 64);
 +    }
-+    zunsafe_buf_call(total, "sha1_multi_block", ctx, inp, n4x);
++    zunsafe_buf_call(total, "sha1_multi_block", ctx, d, n4x);
 +}
 
  typedef struct {
@@ -2155,24 +2342,27 @@ diff --git a/openssl/crypto/evp/e_aes_cbc_hmac_sha256.c b/openssl/crypto/evp/e_a
 
  typedef struct {
      AES_KEY ks;
-@@ -139,7 +140,20 @@
+@@ -139,7 +140,23 @@
      int blocks;
  } HASH_DESC;
 
 -void sha256_multi_block(SHA256_MB_CTX *, const HASH_DESC *, int);
++/* The assembly reads the descriptors itself, so it is given copies that
++   nothing can change once they are checked. */
 +void sha256_multi_block(SHA256_MB_CTX *ctx, const HASH_DESC *inp, int n4x)
 +{
 +    zcheck(ctx, sizeof(SHA256_MB_CTX));
 +    ZSAFETY_CHECK(n4x == 1 || n4x == 2);
 +    unsigned len = n4x * 4;
-+    zcheck_readonly(inp, zchecked_mul(len, sizeof(HASH_DESC)));
++    HASH_DESC d[8];
 +    unsigned i;
 +    unsigned total = 0;
 +    for (i = len; i--;) {
-+        zcheck_readonly(inp[i].ptr, zchecked_mul(inp[i].blocks, 64));
-+        total += zchecked_mul(inp[i].blocks, 64);
++        d[i] = inp[i];
++        zcheck_readonly(d[i].ptr, zchecked_mul(d[i].blocks, 64));
++        total += zchecked_mul(d[i].blocks, 64);
 +    }
-+    zunsafe_buf_call(total, "sha256_multi_block", ctx, inp, n4x);
++    zunsafe_buf_call(total, "sha256_multi_block", ctx, d, n4x);
 +}
 
  typedef struct {
@@ -2188,14 +2378,18 @@ diff --git a/openssl/crypto/evp/e_chacha20_poly1305.c b/openssl/crypto/evp/e_cha
 
  typedef struct {
      union {
-@@ -206,8 +207,20 @@
+@@ -206,8 +207,26 @@
 
  #if defined(POLY1305_ASM) && (defined(__x86_64) || defined(__x86_64__) || defined(_M_AMD64) || defined(_M_X64))
  #define XOR128_HELPERS
 -void *xor128_encrypt_n_pad(void *out, const void *inp, void *otp, size_t len);
 -void *xor128_decrypt_n_pad(void *out, const void *inp, void *otp, size_t len);
++/* Given no bytes, the assembly would still process one and go on from
++   there. */
 +void *xor128_encrypt_n_pad(void *out, const void *inp, void *otp, size_t len)
 +{
++    if (len == 0)
++        return otp;
 +    zcheck(out, len);
 +    zcheck_readonly(inp, len);
 +    zcheck(otp, (len + 15) & -16);
@@ -2203,6 +2397,8 @@ diff --git a/openssl/crypto/evp/e_chacha20_poly1305.c b/openssl/crypto/evp/e_cha
 +}
 +void *xor128_decrypt_n_pad(void *out, const void *inp, void *otp, size_t len)
 +{
++    if (len == 0)
++        return otp;
 +    zcheck(out, len);
 +    zcheck_readonly(inp, len);
 +    zcheck(otp, (len + 15) & -16);
@@ -2222,7 +2418,7 @@ diff --git a/openssl/crypto/md5/md5_dgst.c b/openssl/crypto/md5/md5_dgst.c
 
  /*
   * Implemented from RFC1321 The MD5 Message-Digest Algorithm
-@@ -166,5 +167,12 @@
+@@ -166,5 +167,16 @@
          C = c->C += C;
          D = c->D += D;
      }
@@ -2230,6 +2426,10 @@ diff --git a/openssl/crypto/md5/md5_dgst.c b/openssl/crypto/md5/md5_dgst.c
 +#else
 +void md5_block_data_order(MD5_CTX *c, const void *data_, size_t num)
 +{
++    /* Given no blocks, some of the assembly (aarch64's) would still process
++       one and go on from there. */
++    if (num == 0)
++        return;
 +    zcheck(c, sizeof(MD5_CTX));
 +    zcheck_readonly(data_, zchecked_mul(num, MD5_CBLOCK));
 +    zunsafe_buf_call(num, "ossl_md5_block_asm_data_order", c, data_, num);
@@ -2259,7 +2459,7 @@ diff --git a/openssl/crypto/modes/aesni_gcm_asm_forward.c b/openssl/crypto/modes
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/modes/aesni_gcm_asm_forward.c
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,47 @@
 +#include "internal/deprecated.h"
 +
 +#include <assert.h>
@@ -2271,13 +2471,26 @@ new file mode 100644
 +#include "crypto/aes_platform.h"
 +#include <stdfil.h>
 +#include <stddef.h>
++#include <stdint.h>
++
++/* The assembly takes the number of round keys to read from the key itself;
++   out must not overlap the key, as for the other AES routines. */
++static void check_key(const void *key, const unsigned char *out, size_t len)
++{
++    const AES_KEY *k = key;
++    uintptr_t o = (uintptr_t)out, s = (uintptr_t)key;
++
++    zcheck_readonly(k, sizeof(AES_KEY));
++    ZSAFETY_CHECK(k->rounds == 9 || k->rounds == 11 || k->rounds == 13);
++    ZSAFETY_CHECK(o >= s + sizeof(AES_KEY) || s >= o + len);
++}
 +
 +size_t aesni_gcm_encrypt(const unsigned char *in, unsigned char *out, size_t len,
 +                         const void *key, unsigned char ivec[16], u64 *Xi)
 +{
 +    zcheck_readonly(in, len);
 +    zcheck(out, len);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, len);
 +    zcheck(ivec, 16);
 +    zcheck(Xi, sizeof(GCM128_CONTEXT) - offsetof(GCM128_CONTEXT, Xi));
 +    return zunsafe_buf_call(len, "aesni_gcm_encrypt", in, out, len, key, ivec, Xi);
@@ -2288,7 +2501,7 @@ new file mode 100644
 +{
 +    zcheck_readonly(in, len);
 +    zcheck(out, len);
-+    zcheck_readonly(key, sizeof(AES_KEY));
++    check_key(key, out, len);
 +    zcheck(ivec, 16);
 +    zcheck(Xi, sizeof(GCM128_CONTEXT) - offsetof(GCM128_CONTEXT, Xi));
 +    return zunsafe_buf_call(len, "aesni_gcm_decrypt", in, out, len, key, ivec, Xi);
@@ -2384,7 +2597,7 @@ diff --git a/openssl/crypto/modes/gcm128.c b/openssl/crypto/modes/gcm128.c
 
  #if defined(__GNUC__) && !defined(STRICT_ALIGNMENT)
  typedef size_t size_t_aX __attribute((__aligned__(1)));
-@@ -321,9 +322,21 @@
+@@ -321,9 +322,23 @@
  }
  #endif
  #else
@@ -2398,9 +2611,11 @@ diff --git a/openssl/crypto/modes/gcm128.c b/openssl/crypto/modes/gcm128.c
 +    zunsafe_fast_call("gcm_gmult_4bit", Xi, Htable);
 +}
 +
++/* The gcm_ghash_* routines take whole blocks only, and at least one. */
 +static void gcm_ghash_4bit(u64 Xi[2], const u128 Htable[16], const u8 *inp,
 +                           size_t len)
 +{
++    ZSAFETY_CHECK(len != 0 && len % 16 == 0);
 +    zcheck(Xi, sizeof(u64) * 2);
 +    zcheck_readonly(Htable, sizeof(u128) * 16);
 +    zcheck_readonly(inp, len);
@@ -2409,7 +2624,7 @@ diff --git a/openssl/crypto/modes/gcm128.c b/openssl/crypto/modes/gcm128.c
  #endif
 
  #define GCM_MUL(ctx) ctx->funcs.gmult(ctx->Xi.u, ctx->Htable)
-@@ -341,20 +354,56 @@
+@@ -341,20 +356,58 @@
  #if !defined(I386_ONLY) && (defined(__i386) || defined(__i386__) || defined(__x86_64) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_AMD64) || defined(_M_X64))
  #define GHASH_ASM_X86_OR_64
 
@@ -2434,6 +2649,7 @@ diff --git a/openssl/crypto/modes/gcm128.c b/openssl/crypto/modes/gcm128.c
 +static void gcm_ghash_clmul(u64 Xi[2], const u128 Htable[16], const u8 *inp,
 +                            size_t len)
 +{
++    ZSAFETY_CHECK(len != 0 && len % 16 == 0);
 +    zcheck(Xi, sizeof(u64) * 2);
 +    zcheck_readonly(Htable, sizeof(u128) * 16);
 +    zcheck_readonly(inp, len);
@@ -2465,6 +2681,7 @@ diff --git a/openssl/crypto/modes/gcm128.c b/openssl/crypto/modes/gcm128.c
 -    size_t len);
 +                   size_t len)
 +{
++    ZSAFETY_CHECK(len != 0 && len % 16 == 0);
 +    zcheck(Xi, sizeof(u64) * 2);
 +    zcheck_readonly(Htable, sizeof(u128) * 16);
 +    zcheck_readonly(inp, len);
@@ -2473,7 +2690,7 @@ diff --git a/openssl/crypto/modes/gcm128.c b/openssl/crypto/modes/gcm128.c
  #endif
 
  #if defined(__i386) || defined(__i386__) || defined(_M_IX86)
-@@ -379,10 +428,42 @@
+@@ -379,10 +432,42 @@
  void gcm_gmult_neon(u64 Xi[2], const u128 Htable[16]);
  void gcm_ghash_neon(u64 Xi[2], const u128 Htable[16], const u8 *inp,
      size_t len);
@@ -2516,6 +2733,39 @@ diff --git a/openssl/crypto/modes/gcm128.c b/openssl/crypto/modes/gcm128.c
  #endif
  #elif defined(__sparc__) || defined(__sparc)
  #include "crypto/sparc_arch.h"
+diff --git a/openssl/crypto/modes/ocb128.c b/openssl/crypto/modes/ocb128.c
+--- a/openssl/crypto/modes/ocb128.c
++++ b/openssl/crypto/modes/ocb128.c
+@@ -337,11 +337,13 @@
+
+     if (num_blocks && all_num_blocks == (size_t)all_num_blocks
+         && ctx->stream != NULL) {
+-        size_t max_idx = 0, top = (size_t)all_num_blocks, processed_bytes = 0;
++        size_t max_idx = 0, top = (size_t)all_num_blocks + 2, processed_bytes = 0;
+
+         /*
+          * See how many L_{i} entries we need to process data at hand
+          * and pre-compute missing entries in the table [if any]...
++         * (aesni_ocb_encrypt and aesni_ocb_decrypt also load the entries of
++         * up to two blocks past the last one.)
+          */
+         while (top >>= 1)
+             max_idx++;
+@@ -432,11 +434,13 @@
+
+     if (num_blocks && all_num_blocks == (size_t)all_num_blocks
+         && ctx->stream != NULL) {
+-        size_t max_idx = 0, top = (size_t)all_num_blocks, processed_bytes = 0;
++        size_t max_idx = 0, top = (size_t)all_num_blocks + 2, processed_bytes = 0;
+
+         /*
+          * See how many L_{i} entries we need to process data at hand
+          * and pre-compute missing entries in the table [if any]...
++         * (aesni_ocb_encrypt and aesni_ocb_decrypt also load the entries of
++         * up to two blocks past the last one.)
+          */
+         while (top >>= 1)
+             max_idx++;
 diff --git a/openssl/crypto/poly1305/asm/poly1305-x86_64.pl b/openssl/crypto/poly1305/asm/poly1305-x86_64.pl
 --- a/openssl/crypto/poly1305/asm/poly1305-x86_64.pl
 +++ b/openssl/crypto/poly1305/asm/poly1305-x86_64.pl
@@ -2542,7 +2792,7 @@ diff --git a/openssl/crypto/poly1305/poly1305.c b/openssl/crypto/poly1305/poly13
 
  size_t Poly1305_ctx_size(void)
  {
-@@ -394,11 +395,28 @@
+@@ -394,11 +395,29 @@
  }
  #endif
  #else
@@ -2563,7 +2813,8 @@ diff --git a/openssl/crypto/poly1305/poly1305.c b/openssl/crypto/poly1305/poly13
 +{
 +    zcheck(ctx, sizeof(poly1305_opaque));
 +    zcheck_readonly(inp, len);
-+    zunsafe_buf_call(len, "poly1305_blocks", ctx, inp, len, padbit);
++    /* The assembly reads padbit from the whole register. */
++    zunsafe_buf_call(len, "poly1305_blocks", ctx, inp, len, (size_t)padbit);
 +}
 +static void poly1305_emit(void *ctx, unsigned char mac[16],
 +                          const unsigned int nonce[4])
@@ -2576,7 +2827,7 @@ diff --git a/openssl/crypto/poly1305/poly1305.c b/openssl/crypto/poly1305/poly13
  #endif
 
  void Poly1305_Init(POLY1305 *ctx, const unsigned char key[32])
-@@ -426,26 +444,8 @@
+@@ -426,26 +445,8 @@
      ctx->num = 0;
  }
 
@@ -2603,7 +2854,7 @@ diff --git a/openssl/crypto/poly1305/poly1305.c b/openssl/crypto/poly1305/poly13
      size_t rem, num;
 
      if ((num = ctx->num)) {
-@@ -479,10 +479,6 @@
+@@ -479,10 +480,6 @@
 
  void Poly1305_Final(POLY1305 *ctx, unsigned char mac[16])
  {
@@ -2639,25 +2890,43 @@ diff --git a/openssl/crypto/rc4/rc4_asm_forward.c b/openssl/crypto/rc4/rc4_asm_f
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/rc4/rc4_asm_forward.c
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,40 @@
 +#include "internal/deprecated.h"
 +
++#include <stdint.h>
 +#include <openssl/rc4.h>
 +#include "rc4_local.h"
 +#include <openssl/opensslv.h>
 +#include <stdfil.h>
 +
++/* The assembly reads len from the whole register, and given none it would
++   read 256 bytes of data. */
 +void RC4_set_key(RC4_KEY *key, int len, const unsigned char *data)
 +{
++    ZSAFETY_CHECK(len > 0);
 +    zcheck(key, sizeof(RC4_KEY));
 +    zcheck_readonly(data, len);
-+    zunsafe_buf_call(len, "RC4_set_key", key, len, data);
++    zunsafe_buf_call(len, "RC4_set_key", key, (size_t)len, data);
 +}
 +
 +void RC4(RC4_KEY *key, size_t len, const unsigned char *indata,
 +         unsigned char *outdata)
 +{
++    uintptr_t o = (uintptr_t)outdata, k = (uintptr_t)key;
++    RC4_INT entries = 0;
++    int i;
++
 +    zcheck(key, sizeof(RC4_KEY));
++    /* Unless the table is one of bytes (RC4_set_key marks that with -1 in
++       data[64]), the assembly uses each 32-bit entry, unmasked, as the next
++       index, so every entry must be under 256; and it keeps reading entries
++       while it stores to outdata, so outdata must not overlap the key. */
++    if (key->data[64] != (RC4_INT)-1) {
++        for (i = 0; i < 256; i++)
++            entries |= key->data[i];
++        ZSAFETY_CHECK(entries < 256);
++    }
++    ZSAFETY_CHECK(o >= k + sizeof(RC4_KEY) || k >= o + len);
 +    zcheck_readonly(indata, len);
 +    zcheck(outdata, len);
 +    zunsafe_buf_call(len, "RC4", key, len, indata, outdata);
@@ -2666,7 +2935,7 @@ diff --git a/openssl/crypto/rc4/rc4_md5_asm_forward.c b/openssl/crypto/rc4/rc4_m
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/rc4/rc4_md5_asm_forward.c
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,28 @@
 +#include "internal/deprecated.h"
 +
 +#include <openssl/rc4.h>
@@ -2678,7 +2947,16 @@ new file mode 100644
 +void rc4_md5_enc(RC4_KEY *key, const void *in0, void *out,
 +                 MD5_CTX *ctx, const void *inp, size_t blocks)
 +{
++    if (blocks == 0)
++        return;
 +    zcheck(key, sizeof(RC4_KEY));
++    /* The assembly addresses table entries x+1 to x+32 as one run without
++       wrapping the index, so the run must end on a multiple of 32 or it
++       would go past the table's end. */
++    ZSAFETY_CHECK(((key->x + 1) & 31) == 0);
++    /* No entry-under-256 or out-overlaps-key check as in rc4_asm_forward.c's
++       RC4(): this assembly masks every entry-derived index to a byte and
++       loads key->x and key->y only before its first store. */
 +    zcheck(ctx, sizeof(MD5_CTX));
 +    zcheck_readonly(in0, zchecked_mul(blocks, MD5_CBLOCK));
 +    zcheck(out, zchecked_mul(blocks, MD5_CBLOCK));
@@ -2702,16 +2980,19 @@ diff --git a/openssl/crypto/sha/keccak1600_asm_forward.c b/openssl/crypto/sha/ke
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/sha/keccak1600_asm_forward.c
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,47 @@
 +#include <openssl/e_os2.h>
 +#include <string.h>
 +#include <assert.h>
 +#include <stdfil.h>
 +
++/* The assembly's loops over the r/8 words of a block, here and in
++   SHA3_squeeze, test the count after the first word, so r == 0 would never
++   stop. */
 +size_t SHA3_absorb(uint64_t A[5][5], const unsigned char *inp, size_t len,
 +                   size_t r)
 +{
-+    ZSAFETY_CHECK(r < (25 * sizeof(A[0][0])));
++    ZSAFETY_CHECK(r >= 8 && r < (25 * sizeof(A[0][0])));
 +    ZSAFETY_CHECK((r % 8) == 0);
 +    zcheck(A, 25 * sizeof(A[0][0]));
 +    zcheck_readonly(inp, len);
@@ -2739,7 +3020,7 @@ new file mode 100644
 +
 +void SHA3_squeeze(uint64_t A[5][5], unsigned char *out, size_t len, size_t r, int next)
 +{
-+    ZSAFETY_CHECK(r < (25 * sizeof(A[0][0])));
++    ZSAFETY_CHECK(r >= 8 && r < (25 * sizeof(A[0][0])));
 +    ZSAFETY_CHECK((r % 8) == 0);
 +    zcheck(A, 25 * sizeof(A[0][0]));
 +    zcheck(out, len);
@@ -2788,7 +3069,7 @@ diff --git a/openssl/crypto/sha/sha256.c b/openssl/crypto/sha/sha256.c
 
  int SHA224_Init(SHA256_CTX *c)
  {
-@@ -131,6 +132,15 @@
+@@ -131,6 +132,19 @@
  #endif /* INCLUDE_C_SHA256 */
  #endif /* SHA256_ASM */
      void sha256_block_data_order(SHA256_CTX *ctx, const void *in, size_t num);
@@ -2796,6 +3077,10 @@ diff --git a/openssl/crypto/sha/sha256.c b/openssl/crypto/sha/sha256.c
 +#ifdef SHA256_ASM
 +void sha256_block_data_order(SHA256_CTX *ctx, const void *in, size_t num)
 +{
++    /* Given no blocks, the assembly would still process one and go on from
++       there. */
++    if (num == 0)
++        return;
 +    zcheck(ctx, sizeof(SHA256_CTX));
 +    zcheck_readonly(in, zchecked_mul(num, SHA256_CBLOCK));
 +    zunsafe_buf_call(zchecked_mul(num, SHA256_CBLOCK), "sha256_block_data_order", ctx, in, num);
@@ -2815,7 +3100,7 @@ diff --git a/openssl/crypto/sha/sha512.c b/openssl/crypto/sha/sha512.c
 
  #if defined(__i386) || defined(__i386__) || defined(_M_IX86) || defined(__x86_64) || defined(_M_AMD64) || defined(_M_X64) || defined(__s390__) || defined(__s390x__) || defined(__aarch64__) || defined(SHA512_ASM)
  #define SHA512_BLOCK_CAN_MANAGE_UNALIGNED_DATA
-@@ -151,6 +152,15 @@
+@@ -151,6 +152,19 @@
  #endif
  #endif
      void sha512_block_data_order(SHA512_CTX *ctx, const void *in, size_t num);
@@ -2823,6 +3108,10 @@ diff --git a/openssl/crypto/sha/sha512.c b/openssl/crypto/sha/sha512.c
 +#ifdef SHA512_ASM
 +void sha512_block_data_order(SHA512_CTX *ctx, const void *in, size_t num)
 +{
++    /* Given no blocks, the assembly would still process one and go on from
++       there. */
++    if (num == 0)
++        return;
 +    zcheck(ctx, sizeof(SHA512_CTX));
 +    zcheck_readonly(in, zchecked_mul(num, SHA512_CBLOCK));
 +    zunsafe_buf_call(zchecked_mul(num, SHA512_CBLOCK), "sha512_block_data_order", ctx, in, num);
@@ -3023,7 +3312,7 @@ diff --git a/openssl/crypto/whrlpool/wp_asm_forward.c b/openssl/crypto/whrlpool/
 new file mode 100644
 --- /dev/null
 +++ b/openssl/crypto/whrlpool/wp_asm_forward.c
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,18 @@
 +#include "internal/deprecated.h"
 +
 +#include "internal/cryptlib.h"
@@ -3034,6 +3323,10 @@ new file mode 100644
 +
 +void whirlpool_block(WHIRLPOOL_CTX *ctx, const void *inp, size_t n)
 +{
++    /* Given no blocks, the assembly would still process one and go on from
++       there. */
++    if (n == 0)
++        return;
 +    zcheck(ctx, sizeof(WHIRLPOOL_CTX));
 +    zcheck_readonly(inp, zchecked_mul(n, WHIRLPOOL_BBLOCK / 8));
 +    zunsafe_buf_call(zchecked_mul(n, WHIRLPOOL_BBLOCK / 8), "whirlpool_block", ctx, inp, n);
@@ -3111,7 +3404,7 @@ diff --git a/openssl/engines/e_padlock.c b/openssl/engines/e_padlock.c
 
  #ifndef OPENSSL_NO_PADLOCKENG
 
-@@ -212,23 +213,84 @@
+@@ -212,23 +213,86 @@
  };
 
  /* Interface to assembler module */
@@ -3140,6 +3433,8 @@ diff --git a/openssl/engines/e_padlock.c b/openssl/engines/e_padlock.c
 +static void padlock_key_bswap(AES_KEY *key)
 +{
 +    zcheck(key, sizeof(AES_KEY));
++    /* The assembly takes the number of round keys to swap from the key. */
++    ZSAFETY_CHECK((unsigned)key->rounds <= 14);
 +    zunsafe_fast_call("padlock_key_bswap", key);
 +}
 +
@@ -3287,7 +3582,7 @@ diff --git a/openssl/providers/implementations/ciphers/cipher_aes_gcm_hw.c b/ope
 diff --git a/openssl/providers/implementations/ciphers/cipher_aes_gcm_hw_vaes_avx512.inc b/openssl/providers/implementations/ciphers/cipher_aes_gcm_hw_vaes_avx512.inc
 --- a/openssl/providers/implementations/ciphers/cipher_aes_gcm_hw_vaes_avx512.inc
 +++ b/openssl/providers/implementations/ciphers/cipher_aes_gcm_hw_vaes_avx512.inc
-@@ -19,27 +19,69 @@
+@@ -19,27 +19,77 @@
  # define VAES_GCM_ENABLED
 
  /* Returns non-zero when AVX512F + VAES + VPCLMULDQD combination is available */
@@ -3297,6 +3592,9 @@ diff --git a/openssl/providers/implementations/ciphers/cipher_aes_gcm_hw_vaes_av
 +    return zunsafe_fast_call("ossl_vaes_vpclmulqdq_capable");
 +}
 
++/* The assembly reads and writes *pblocklen as 8 bytes and trusts its value (0
++   to 16; 16 is what it leaves after exactly 16 whole blocks), so it is given a
++   checked copy of its own. */
  # define OSSL_AES_GCM_UPDATE(direction)                                 \
 +    static                                                              \
      void ossl_aes_gcm_ ## direction ## _avx512(const void *ks,          \
@@ -3307,14 +3605,18 @@ diff --git a/openssl/providers/implementations/ciphers/cipher_aes_gcm_hw_vaes_av
 -                                               unsigned char *out);
 +                                               unsigned char *out)      \
 +    {                                                                   \
++        u64 blocklen;                                                   \
 +        zcheck_readonly(ks, sizeof(AES_KEY));                           \
 +        zcheck(gcm128ctx, sizeof(GCM128_CONTEXT));                      \
 +        zcheck(pblocklen, sizeof(unsigned int));                        \
++        blocklen = *pblocklen;                                          \
++        ZSAFETY_CHECK(blocklen <= 16);                                  \
 +        zcheck_readonly(in, len);                                       \
 +        zcheck(out, len);                                               \
 +        zunsafe_buf_call(                                               \
 +            len, "ossl_aes_gcm_" #direction "_avx512",                  \
-+            ks, gcm128ctx, pblocklen, in, len, out);                    \
++            ks, gcm128ctx, &blocklen, in, len, out);                    \
++        *pblocklen = (unsigned int)blocklen;                            \
 +    }
 
  OSSL_AES_GCM_UPDATE(encrypt)
@@ -3354,7 +3656,8 @@ diff --git a/openssl/providers/implementations/ciphers/cipher_aes_gcm_hw_vaes_av
 +static void ossl_aes_gcm_finalize_avx512(void *gcm128ctx, unsigned int pblocklen)
 +{
 +    zcheck(gcm128ctx, sizeof(GCM128_CONTEXT));
-+    zunsafe_fast_call("ossl_aes_gcm_finalize_avx512", gcm128ctx, pblocklen);
++    /* The assembly reads pblocklen from the whole register. */
++    zunsafe_fast_call("ossl_aes_gcm_finalize_avx512", gcm128ctx, (size_t)pblocklen);
 +}
 +
 +static void ossl_gcm_gmult_avx512(u64 Xi[2], const void *gcm128ctx)

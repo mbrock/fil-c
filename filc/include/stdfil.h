@@ -225,7 +225,9 @@ static inline __attribute__((__always_inline__)) filc_bool zvalinbounds(void* pt
 {
     if (!size)
         return 1;
-    return zinbounds(ptr) && zinbounds((char*)ptr + size - 1);
+    char* upper = (char*)zgetupper(ptr);
+    return (char*)ptr >= (char*)zgetlower(ptr) && (char*)ptr < upper
+        && size <= (__SIZE_TYPE__)(upper - (char*)ptr);
 }
 
 /* Construct a pointer that has the capability from `object` but the address from `address`. This
