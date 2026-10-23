@@ -1,0 +1,13 @@
+URL: https://icon-theme.freedesktop.org/releases/hicolor-icon-theme-0.18.tar.xz 062e251872a23ecf47a127293ae9abf98a1c912f82f819d0cebccf8d9415deb2
+Origname: hicolor-icon-theme-0.18
+Name: hicolor-icon-theme
+
+    hicolor-icon-theme 0.18 (the default fallback icon theme) — pure data:
+    index.theme, the per-size/context empty icon-directory skeleton, and a
+    dataonly pkg-config file (default-icon-theme.pc).  No Fil-C issues (no
+    code).  The icon theme lookup chain (gtk/gdk: requested theme -> hicolor
+    fallback) needs this index.theme; the Adwaita theme installed in postlc7
+    does not provide it, so icon lookups fell back to nothing for themes
+    other than Adwaita (e.g. a session configured with a different theme
+    name, or apps requesting named icons that Adwaita does not carry).
+    0.18 builds with meson (0.18 switched from autotools to meson).

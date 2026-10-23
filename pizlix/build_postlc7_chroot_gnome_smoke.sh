@@ -34,9 +34,31 @@ dbus-send --system --dest=org.freedesktop.DBus --print-reply / \
 # Other session pieces.
 mutter --version
 gnome-session --version
-ls -l /usr/bin/pizlix-gnome /usr/bin/pizlix-mutter \
+
+# Sprint 5: the session's DisplayServer component is gnome-shell now.
+gnome-shell --version
+test -x /usr/bin/gnome-shell
+test -x /usr/bin/pizlix-shell
+
+# The shell's introspection data (gjs finds typelibs through
+# GI_TYPELIB_PATH, which /usr/bin/pizlix-shell exports).
+test -f /usr/lib/gnome-shell/Shell-14.typelib
+test -f /usr/lib/gnome-shell/St-14.typelib
+test -f /usr/lib/gnome-shell/Gvc-1.0.typelib
+test -f /usr/lib/mutter-14/Meta-14.typelib
+
+# The session must require the shell by desktop-file id, and the autostart
+# entry that carries the wrapper must have the same id (a desktop file's id
+# IS its filename); the superseded mutter autostart entry must be gone.
+grep -v '^#' /usr/share/gnome-session/sessions/pizlix-gnome.session \
+    | grep '^RequiredComponents=org.gnome.Shell;$'
+grep '^Exec=/usr/bin/pizlix-shell$' /etc/xdg/autostart/org.gnome.Shell.desktop
+grep '^X-GNOME-Autostart-Phase=DisplayServer$' /etc/xdg/autostart/org.gnome.Shell.desktop
+test ! -e /etc/xdg/autostart/pizlix-mutter.desktop
+
+ls -l /usr/bin/pizlix-gnome /usr/bin/pizlix-shell /usr/bin/pizlix-mutter \
       /usr/share/gnome-session/sessions/pizlix-gnome.session \
-      /etc/xdg/autostart/pizlix-mutter.desktop \
+      /etc/xdg/autostart/org.gnome.Shell.desktop \
       /etc/xdg/autostart/pizlix-terminal.desktop
 
 # Tear it all back down.

@@ -35,15 +35,26 @@ mkdir -pv /usr/share/gnome-session/sessions
 cp -v /sources/etc/gnome-session/pizlix-gnome.session \
       /usr/share/gnome-session/sessions/pizlix-gnome.session
 
-# Autostart entries: mutter (DisplayServer phase) and a terminal.
+# Autostart entries: gnome-shell (DisplayServer phase) and a terminal.
 mkdir -pv /etc/xdg/autostart
-cp -v /sources/etc/xdg/autostart/pizlix-mutter.desktop /etc/xdg/autostart/
+cp -v /sources/etc/xdg/autostart/org.gnome.Shell.desktop /etc/xdg/autostart/
 cp -v /sources/etc/xdg/autostart/pizlix-terminal.desktop /etc/xdg/autostart/
 
+# Sprint 4 wired standalone mutter into the session; Sprint 5 supersedes it
+# with gnome-shell (the same mutter-14 compositor with the shell UI on
+# top).  The session no longer references pizlix-mutter, and its autostart
+# entry must not linger: a DisplayServer-phase entry in /etc/xdg/autostart
+# gets autostarted by every session and would fight the shell for the seat.
+rm -fv /etc/xdg/autostart/pizlix-mutter.desktop
+
 # The launchers: /usr/bin/pizlix-gnome (what the user runs) and
-# /usr/bin/pizlix-mutter (the DisplayServer-phase wrapper).
+# /usr/bin/pizlix-shell (the DisplayServer-phase wrapper).  pizlix-mutter
+# stays installed (it is still built, and useful for mutter-only testing),
+# but nothing in the session starts it anymore.
 cp -v /sources/etc/gnome/pizlix-gnome.sh /usr/bin/pizlix-gnome
 chmod -v 755 /usr/bin/pizlix-gnome
+cp -v /sources/etc/gnome/pizlix-shell.sh /usr/bin/pizlix-shell
+chmod -v 755 /usr/bin/pizlix-shell
 cp -v /sources/etc/gnome/pizlix-mutter.sh /usr/bin/pizlix-mutter
 chmod -v 755 /usr/bin/pizlix-mutter
 

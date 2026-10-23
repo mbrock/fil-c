@@ -54,9 +54,10 @@ mkdir -pv $LFS/sources/etc/xdg/autostart
 mkdir -pv $LFS/sources/etc/gnome
 cp -v etc/init.d/dbus etc/init.d/elogind $LFS/sources/etc/init.d
 cp -v etc/gnome-session/pizlix-gnome.session $LFS/sources/etc/gnome-session
-cp -v etc/xdg/autostart/pizlix-mutter.desktop \
+cp -v etc/xdg/autostart/org.gnome.Shell.desktop \
       etc/xdg/autostart/pizlix-terminal.desktop $LFS/sources/etc/xdg/autostart
-cp -v etc/gnome/pizlix-gnome.sh etc/gnome/pizlix-mutter.sh $LFS/sources/etc/gnome
+cp -v etc/gnome/pizlix-gnome.sh etc/gnome/pizlix-shell.sh \
+      etc/gnome/pizlix-mutter.sh $LFS/sources/etc/gnome
 
 ./build_chroot_late.sh /sources/build_postlc7_sub2_chroot.sh
 

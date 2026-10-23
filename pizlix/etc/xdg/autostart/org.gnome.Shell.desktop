@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=GNOME Shell
+# Desktop-file IDs come from the FILENAME: gnome-session resolves the
+# session's RequiredComponents=org.gnome.Shell; by desktop-file id, so this
+# file must be named org.gnome.Shell.desktop (a pizlix-shell.desktop would
+# be looked up as "pizlix-shell" and never match).  An autostart entry with
+# the same id also shadows the org.gnome.Shell.desktop that gnome-shell
+# installed into /usr/share/applications, whose Exec lacks the pizlonated
+# environment: gnome-session searches the autostart dirs before the
+# applications dirs when resolving required components.
+Exec=/usr/bin/pizlix-shell
+# DisplayServer, not Applications: the shell IS the session's Wayland
+# compositor, and mutter publishes WAYLAND_DISPLAY to the session via
+# org.gnome.SessionManager.Setenv, which gnome-session only accepts in
+# phases up to Initialization (gnome-shell does exactly this in real GNOME).
+X-GNOME-Autostart-Phase=DisplayServer
+# Same provides as the file gnome-shell installs upstream.
+X-GNOME-Provides=panel;windowmanager;
+NoDisplay=true
