@@ -2445,7 +2445,6 @@ GetSSETypeAtOffset(llvm::Type *IRType, unsigned IROffset,
   return llvm::Type::getDoubleTy(getVMContext());
 }
 
-
 /// GetINTEGERTypeAtOffset - The ABI specifies that a value should be passed in
 /// an 8-byte GPR.  This means that we either have a scalar or we are talking
 /// about the high or low part of an up-to-16-byte struct.  This routine picks
@@ -2460,9 +2459,10 @@ GetSSETypeAtOffset(llvm::Type *IRType, unsigned IROffset,
 /// SourceTy is the source-level type for the entire argument.  SourceOffset is
 /// an offset into this that we're processing (which is always either 0 or 8).
 ///
-llvm::Type *X86_64ABIInfo::
-GetINTEGERTypeAtOffset(llvm::Type *IRType, unsigned IROffset,
-                       QualType SourceTy, unsigned SourceOffset) const {
+llvm::Type *X86_64ABIInfo::GetINTEGERTypeAtOffset(llvm::Type *IRType,
+                                                  unsigned IROffset,
+                                                  QualType SourceTy,
+                                                  unsigned SourceOffset) const {
   // If we're dealing with an un-offset LLVM IR type, then it means that we're
   // returning an 8-byte unit starting with it.  See if we can safely use it.
   if (IROffset == 0) {
@@ -2522,7 +2522,6 @@ GetINTEGERTypeAtOffset(llvm::Type *IRType, unsigned IROffset,
                                 std::min(TySizeInBytes-SourceOffset, 8U)*8);
 }
 
-
 /// GetX86_64ByValArgumentPair - Given a high and low type that can ideally
 /// be used as elements of a two register pair to pass or return, return a
 /// first class aggregate to represent them.  For example, if the low part of
@@ -2567,8 +2566,7 @@ GetX86_64ByValArgumentPair(llvm::Type *Lo, llvm::Type *Hi,
   return Result;
 }
 
-ABIArgInfo X86_64ABIInfo::
-classifyReturnType(QualType RetTy) const {
+ABIArgInfo X86_64ABIInfo::classifyReturnType(QualType RetTy) const {
   // AMD64-ABI 3.2.3p4: Rule 1. Classify the return type with the
   // classification algorithm.
   X86_64ABIInfo::Class Lo, Hi;
@@ -2705,7 +2703,12 @@ X86_64ABIInfo::classifyArgumentType(QualType Ty, unsigned freeIntRegs,
   if (!isNamedArg && isAggregateTypeForABI(Ty) &&
       !getRecordArgABI(Ty, getCXXABI())) {
     neededInt = neededSSE = 0;
-    return getNaturalAlignIndirect(Ty, /*ByVal=*/true);
+    // The packet demoter requires a word-aligned source even for an odd-sized
+    // object. This also makes CGCall stage packed subobjects when necessary.
+    ABIArgInfo AI = getNaturalAlignIndirect(Ty, /*ByVal=*/true);
+    AI.setIndirectAlign(
+        std::max(AI.getIndirectAlign(), CharUnits::fromQuantity(8)));
+    return AI;
   }
 
   Ty = useFirstFieldIfTransparentUnion(Ty);
