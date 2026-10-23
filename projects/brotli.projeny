@@ -1,6 +1,7 @@
-Archive: brotli-1.2.0.tar.gz
-Origname: brotli-1.2.0
+URL: https://github.com/google/brotli/archive/refs/tags/v1.2.1.tar.gz 1fa1b8b9120e13315c8ab32e4ea71c94bbf7e763e382a870a628cc478876434f
+Origname: brotli-1.2.1
 Name: brotli
 
-    brotli 1.2.0 with no Fil-C changes; the 1.1.0 tree was
-    byte-identical to its upstream release tarball, so the patch is empty.
+    brotli 1.2.1 with no Fil-C changes; the 1.1.0 tree was
+    byte-identical to its upstream release tarball and the patch has
+    stayed empty through 1.2.1.

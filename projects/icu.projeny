@@ -1,21 +1,28 @@
-URL: https://github.com/unicode-org/icu/releases/download/release-78.3/icu4c-78.3-sources.tgz 5657d84c78549f198f1335ec9d2f1de2b0ac2771fe081cbf00016370872c13f3
+URL: https://github.com/unicode-org/icu/releases/download/release-79.1/icu4c-79.1-sources.tgz 30136d14852f4b1c357b244f67a04dc67885f7ea9a63f337ef087c466cf6b1c6
 Origname: icu
 Name: icu
 
-    icu 78.3 with the Fil-C port (capability-safe converter clone,
+    icu 79.1 with the Fil-C port (capability-safe converter clone,
     compiler-fence aliasing barrier, no assembly data objects,
     pointer-TOC data length fix). The archive is the pristine official
-    ICU4C source distribution icu4c-78.3-sources.tgz (sha256
-    3a2e7a47604ba702f345878308e6fefeca612ee895cf4a5f222e7955fabfe0c0;
-    md5 matches the release's icu4c-78.3-sources.md5). It carries no
+    ICU4C source distribution icu4c-79.1-sources.tgz (sha256
+    06fa63ecb521048f8082f12ad988f6b678d90cbd88aafce24cbc94902b191d99;
+    md5 matches the release's icu4c-79.1-sources.md5). It carries no
     symlinks and no .git* entries, so unlike the previous codeload-based
     repack it needs no LICENSE symlink workaround. It is the icu4c
-    release dist rather than the whole monorepo: the workdir now holds
+    release dist rather than the whole monorepo: the workdir holds
     source/ at the top level (build_icu.sh and the optfil/pizlix
     pizlonated-icu consumers follow it there), and ICU's own prebuilt
-    source/data/in/icudt78l.dat stands in for the data .txt sources the
+    source/data/in/icudt79l.dat stands in for the data .txt sources the
     monorepo carries. Every Fil-C change lives in the patch below,
     none in the tarball.
+
+    Upstream note for 79: initAliasData() in common/ucnv_io.cpp now gates
+    its data-length checks on an isDataLengthKnown flag of its own
+    (upstream adopted the pointer-TOC idea independently), so the Fil-C
+    delta there is just the explanatory comment, the unconditional
+    tableStart [minTocLength, normalizedStringTableIndex] bound, and the
+    accumulation overflow guard.
 
     GENCCODE_ASSEMBLY note: the configure/configure.ac hunks clear
     GENCCODE_ASSEMBLY unconditionally (not behind __PIZLONATOR_WAS_HERE__),
@@ -82,7 +89,7 @@ diff --git a/icu/source/common/ucnv.cpp b/icu/source/common/ucnv.cpp
  /* size of intermediate and preflighting buffers in ucnv_convert() */
  #define CHUNK_SIZE 1024
 
-@@ -233,7 +241,10 @@
+@@ -236,7 +244,10 @@
          uintptr_t aligned_p = (p + alignof(UConverter) - 1) & ~(alignof(UConverter) - 1);
          ptrdiff_t pointerAdjustment = aligned_p - p;
          if (bufferSizeNeeded + pointerAdjustment <= stackBufferSize) {
@@ -97,11 +104,11 @@ diff --git a/icu/source/common/ucnv.cpp b/icu/source/common/ucnv.cpp
 diff --git a/icu/source/common/ucnv_io.cpp b/icu/source/common/ucnv_io.cpp
 --- a/icu/source/common/ucnv_io.cpp
 +++ b/icu/source/common/ucnv_io.cpp
-@@ -249,14 +249,39 @@
+@@ -249,15 +249,42 @@
 
      sectionSizes = static_cast<const uint32_t*>(udata_getMemory(data));
      int32_t dataLength = udata_getLength(data); // This is the length minus the UDataInfo size
--    if (dataLength <= int32_t(sizeof(sectionSizes[0]))) {
+-    UBool isDataLengthKnown = dataLength >= 0; // Only false when using a pointer table of contents (not files nor a common data archive)
 +    /* Fil-C: udata_getLength() (see udatamem.cpp) returns -1 if and only if the
 +       length is unknown, which happens exactly when the data uses a pointer
 +       table of contents (compiled-in static data) rather than a memory-mapped
@@ -111,9 +118,12 @@ diff --git a/icu/source/common/ucnv_io.cpp b/icu/source/common/ucnv_io.cpp
 +       [minTocLength, normalizedStringTableIndex] unconditionally (see below),
 +       and pointer-TOC data is built into the binary (not attacker-controlled
 +       input), while every file/archive path yields dataLength >= 0 and keeps
-+       the full truncation checks. */
++       the full truncation checks. (Upstream ICU 79 adopted the same
++       isDataLengthKnown gating independently; the Fil-C hardening below --
++       the unconditional tableStart bound and the accumulation overflow guard
++       -- remains Fil-C-only.) */
 +    UBool isDataLengthKnown = dataLength >= 0;
-+    if (isDataLengthKnown && dataLength <= int32_t(sizeof(sectionSizes[0]))) {
+     if (isDataLengthKnown && dataLength <= int32_t(sizeof(sectionSizes[0]))) {
          // We don't even have a TOC!
          goto invalidFormat;
      }
@@ -134,12 +144,12 @@ diff --git a/icu/source/common/ucnv_io.cpp b/icu/source/common/ucnv_io.cpp
 +        goto invalidFormat;
 +    }
      sizeOfTOC = int32_t((tableStart + 1) * sizeof(sectionSizes[0]));
--    if (tableStart < minTocLength || dataLength <= sizeOfTOC) {
+-    if (tableStart < minTocLength || (isDataLengthKnown && dataLength <= sizeOfTOC)) {
 +    if (isDataLengthKnown && dataLength <= sizeOfTOC) {
          // We don't have a whole TOC!
          goto invalidFormat;
      }
-@@ -277,9 +302,15 @@
+@@ -278,6 +305,12 @@
 
      sizeOfData = sizeOfTOC;
      for (uint32_t section = 1; section <= tableStart; section++) {
@@ -151,11 +161,7 @@ diff --git a/icu/source/common/ucnv_io.cpp b/icu/source/common/ucnv_io.cpp
 +        }
          sizeOfData += sectionSizes[section] * sizeof(table[0]);
      }
--    if (dataLength < sizeOfData) {
-+    if (isDataLengthKnown && dataLength < sizeOfData) {
-         // Truncated file!
-         goto invalidFormat;
-     }
+     if (isDataLengthKnown && dataLength < sizeOfData) {
 diff --git a/icu/source/common/unicode/char16ptr.h b/icu/source/common/unicode/char16ptr.h
 --- a/icu/source/common/unicode/char16ptr.h
 +++ b/icu/source/common/unicode/char16ptr.h
@@ -173,7 +179,7 @@ diff --git a/icu/source/common/unicode/char16ptr.h b/icu/source/common/unicode/c
 diff --git a/icu/source/configure b/icu/source/configure
 --- a/icu/source/configure
 +++ b/icu/source/configure
-@@ -7037,6 +7037,7 @@
+@@ -7038,6 +7038,7 @@
  #    GENCCODE_ASSEMBLY="-a aCC-ia64"
      ;;
  esac

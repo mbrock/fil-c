@@ -266,6 +266,10 @@ DEFINE_TEST(test_write_disk_secure)
 #if ENOTSUP != EOPNOTSUPP
 				case EOPNOTSUPP:
 #endif
+				/* Some libcs (e.g. the pizlonated glibc
+				 * used by Fil-C) return EPERM when asked
+				 * to lchmod() a symlink on Linux. */
+				case EPERM:
 					working_lchmod = 0;
 					break;
 				default:

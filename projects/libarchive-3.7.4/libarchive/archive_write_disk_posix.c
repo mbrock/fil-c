@@ -3795,10 +3795,15 @@ set_mode(struct archive_write_disk *a, int mode)
 #if ENOTSUP != EOPNOTSUPP
 			case EOPNOTSUPP:
 #endif
+			case EPERM:
 				/*
 				 * if lchmod is defined but the platform
 				 * doesn't support it, silently ignore
-				 * error
+				 * error.  Some libcs (e.g. the pizlonated
+				 * glibc used by Fil-C) return EPERM rather
+				 * than ENOTSUP when asked to lchmod() a
+				 * symlink on Linux, since symlinks cannot
+				 * have permissions there.
 				 */
 				break;
 			default:
