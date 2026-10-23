@@ -31,6 +31,21 @@
 // encoding, documented in vcs.cc); the applier accepts them plus git-style
 // diffs (a/b prefixes, /dev/null sides, new/deleted/old/new mode lines,
 // rename from/to, `\ No newline at end of file`) with fuzz and -p1 semantics.
+// Plain unified diffs (---/+++ blocks with no `diff --git` header, with or
+// without a prose preamble before the first block) are accepted too; their
+// labels strip like every other patch label, so they apply like `patch
+// -p1` run inside the tree. Prefix-free plain labels (the `--- old/f
+// +++ new/f` shape `diff -u` and recursive `diff -ruN` emit) resolve
+// tree-guided with the same -p1 fallback: the whole label path when it
+// exists in the target tree, else one component stripped. GNU diff -N
+// also marks the nonexistent side of an add/delete block with an epoch
+// timestamp (1970-01-01 00:00:00 +0000) instead of /dev/null; such a
+// side reads as missing, so those blocks apply as creations/removals
+// exactly like GNU patch applies them (a file emptied by an epoch-marked
+// block is removed). A plain block whose two sides name different paths
+// applies to the old-side name, like GNU patch ("patching file <old
+// name>"): plain diffs never rename — only explicit `rename from/to`
+// headers do.
 // A git `Binary files ... differ` stanza without a payload, or a foreign
 // `GIT binary patch` section our base64 decoder rejects, parses as a binary
 // block with no payload: it applies as a per-file failure (merge conflict),
@@ -192,25 +207,41 @@ std::vector<std::string> vcs_binary_add_paths(const std::string& patch,
 // stored patch would lose the new file entirely and the next setup would
 // resurrect the old path with the committed file silently gone. Where
 // pairing re-finds the rename instead, the extra keep entry is harmless.
+// treedir is the tree the patch targets (the workdir for apply): it lets
+// prefix-free plain-diff labels resolve with the GNU patch -p1 fallback;
+// pass "" when the target tree is unknown or the patch is
+// projeny-generated.
 std::vector<std::string> vcs_add_paths(const std::string& patch,
-                                       const std::string& wid);
+                                       const std::string& wid,
+                                       const std::string& treedir);
 
 // Workdir-relative deleted paths of pure-deletion blocks in `patch`
 // (excluding renames). Used by commit to tell previously committed deletes
-// (tracked: still deleted) apart from new disappearances.
+// (tracked: still deleted) apart from new disappearances. treedir is the
+// tree the patch targets (the workdir for apply): it lets prefix-free
+// plain-diff labels resolve with the GNU patch -p1 fallback; pass "" when
+// the target tree is unknown or the patch is projeny-generated.
 std::vector<std::string> vcs_deleted_paths(const std::string& patch,
-                                           const std::string& wid);
+                                           const std::string& wid,
+                                           const std::string& treedir);
 
 // (from, to) workdir-relative path pairs of every rename-shaped block in
 // `patch`: blocks carrying `rename from`/`rename to` headers (projeny's own
 // diff and `git diff -M` alike; already wid-stripped like every other
-// patch path), plus header-less blocks whose ---/+++ sides name two
-// different non-empty paths — exactly the shapes the applier moves. Used
-// by `projeny apply` to record the patch's renames in the status file.
+// patch path), plus git-style blocks whose ---/+++ sides name two
+// different non-empty paths — exactly the shapes the applier moves. Plain
+// unified blocks (no diff --git header) pair nothing: GNU diff has no
+// rename syntax, so a differing-sides plain block applies to its old-side
+// name instead of renaming. Used by `projeny apply` to record the patch's
+// renames in the status file.
 // Combined-diff blocks, empty sides, and identical sides pair nothing;
-// pairs are deduplicated in patch order.
+// pairs are deduplicated in patch order. treedir is the tree the patch
+// targets (the workdir for apply): it lets prefix-free plain-diff labels
+// resolve with the GNU patch -p1 fallback; pass "" when the target tree
+// is unknown or the patch is projeny-generated.
 std::vector<std::pair<std::string, std::string>> vcs_rename_pairs(
-    const std::string& patch, const std::string& wid);
+    const std::string& patch, const std::string& wid,
+    const std::string& treedir);
 
 // Drop pure-add blocks whose new path is not in `keep` (workdir-relative,
 // exact or under-a-kept-dir). Used by commit so untracked files (never
@@ -296,11 +327,24 @@ bool vcs_apply_with_conflicts(const std::string& treedir,
                               std::vector<std::string>* conflicts,
                               VcsApplyMode mode);
 
+// True when `patch` holds at least one recognizable diff block: a
+// "diff --git"/"diff --cc"/"diff --combined" header, or a plain unified
+// diff block ("--- label" followed by "+++ label" plus a "@@" hunk header,
+// or a hunk-less /dev/null add or delete). Prose before or between blocks
+// (a preamble, mail headers, a diffstat) never counts. Used by `projeny
+// patch`/`apply` to refuse patches that hold no diffs at all.
+bool vcs_patch_has_diff_blocks(const std::string& patch);
+
 // All workdir-relative paths `patch` touches under `wid` (both sides of
 // renames; display fallback when a block has no parseable path). Used to
 // pick the right wid for `projeny patch` without trial application.
+// treedir is the tree the patch targets (the workdir for apply): it lets
+// prefix-free plain-diff labels resolve with the GNU patch -p1 fallback;
+// pass "" when the target tree is unknown or the patch is
+// projeny-generated.
 std::vector<std::string> vcs_touched_paths(const std::string& patch,
-                                           const std::string& wid);
+                                           const std::string& wid,
+                                           const std::string& treedir);
 
 // Three-way merge one file: base (may be missing), ours (fresh setup file,
 // may be missing), theirs (user file, may be missing) -> write merged result

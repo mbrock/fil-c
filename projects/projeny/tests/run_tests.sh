@@ -17216,7 +17216,12 @@ run_in "$T308" expect_ok "the re-set-up project is clean" "$PROJENY" \
 # original); the error paths (missing status file, empty patch,
 # no-diff-blocks patch, missing patch file, help topic); and the binary
 # add roundtrip (NUL-bearing bytes travel base64, land byte-exact, and
-# are marked added).
+# are marked added). Sections 323-324 cover plain unified diffs (no
+# `diff --git` header): prose preambles and trailing mail prose are
+# ignored, hunk bodies are read exactly to their @@ counts (label-pair
+# shapes inside a hunk stay content), hunk-less /dev/null pairs create
+# and delete empty files, and the results match GNU patch and survive
+# the commit roundtrip.
 
 # ------------------- 309. apply: a projeny diff onto a fresh checkout
 TAP="$ROOT/t309"
@@ -18114,6 +18119,1045 @@ run_in "$TFH" expect_ok "the spliced file takes the forward-apply path" \
 expect_file_eq \
     "the spliced file is no longer skipped (forward-apply bytes land)" \
     "$TFH/U/f" "$ROOT/t322-forward-expected"
+
+# ------------------- 323. patch/apply: plain unified diffs (no diff --git
+#                            header)
+#
+# The patch parser recognizes plain unified diff blocks alongside git-style
+# ones: a `--- <label>` / `+++ <label>` pair starts a block when a @@ hunk
+# follows it or when one side is /dev/null, and prose around the blocks
+# (cover notes, Explanation/dashes headers, diffstats, trailing mail
+# signatures) is ignored — a hunk body is read exactly to its @@ counts, so
+# ---/+++ shapes inside a hunk body are content, never block starts. Blocks
+# below are checked against GNU patch: wherever GNU patch accepts the same
+# input it must produce a byte-identical tree. One shape has no GNU
+# reference: GNU patch (2.7.6) rejects a hunk-less /dev/null pair outright
+# ("Only garbage was found in the patch input"), so the hunk-less
+# empty-file add/delete below is checked against projeny's own behavior
+# only.
+
+T23="$ROOT/t323"
+mkdir -p "$T23/A" "$T23/B" "$T23/C"
+make_tarballs "$T23" fake
+write_projeny "$T23/A" fake 1.0 fake
+write_projeny "$T23/B" fake 1.0 fake
+write_projeny "$T23/C" fake 1.0 fake
+cp "$T23/fake-1.0.tar.gz" "$T23/A/" && cp "$T23/fake-1.0.tar.gz" "$T23/B/" && \
+    cp "$T23/fake-1.0.tar.gz" "$T23/C/"
+run_in "$T23/A" expect_ok "plain fixture setup A" "$PROJENY" setup fake.projeny
+run_in "$T23/B" expect_ok "plain fixture setup B" "$PROJENY" setup fake.projeny
+run_in "$T23/C" expect_ok "plain fixture setup C" "$PROJENY" setup fake.projeny
+# The patch: a prose preamble (cover note, Explanation/dashes header,
+# bullets, a bare --- separator, a diffstat), then two blocks back to back
+# (the second starts on the first block's last hunk line, exercising the
+# count-exhaustion path), then trailing mail prose that must be ignored.
+# Blank context lines carry their single leading space.
+# Built with printf so the exact bytes are explicit: blank context lines
+# carry a single space, and the trailing "-- " signature line ends in one.
+printf '%s\n' \
+    'Subject: [PATCH] tweak the fake project' \
+    '' \
+    'Here is a cover note describing the change below; it is plain prose' \
+    'and carries no diff metadata at all.' \
+    '' \
+    'Explanation' \
+    '-----------' \
+    '' \
+    '  (b) src/a.c does the thing' \
+    '  (c) src/b.c says v2' \
+    '' \
+    'no diff markers here' \
+    '---' \
+    ' a/src/a.c | 2 +-' \
+    ' a/src/b.c | 2 +-' \
+    ' 2 files changed, 2 insertions(+), 2 deletions(-)' \
+    '' \
+    '--- a/src/a.c' \
+    '+++ b/src/a.c' \
+    '@@ -1,7 +1,7 @@' \
+    ' int alpha = 1;' \
+    ' ' \
+    ' int beta = 1;' \
+    ' ' \
+    '-int gamma = 1;' \
+    '+int gamma = 42;' \
+    ' ' \
+    ' int delta = 1;' \
+    '--- a/src/b.c' \
+    '+++ b/src/b.c' \
+    '@@ -1 +1 @@' \
+    '-line one v1' \
+    '+line one v2' \
+    '-- ' \
+    '2.47.1' \
+    > "$T23/plain.diff"
+pout="$(run_in "$T23/A" "$PROJENY" apply fake.projeny "$T23/plain.diff" 2>&1)"
+prc=$?
+if [ $prc -eq 0 ]; then
+    ok "a plain unified diff applies inside a checkout"
+else
+    fail "a plain unified diff applies inside a checkout" "exit=$prc out: $pout"
+fi
+case "$pout" in
+*"applied '$T23/plain.diff'"*)
+    ok "the plain apply reports success"
+    ;;
+*)
+    fail "the plain apply reports success" "out: $pout"
+    ;;
+esac
+expect_file_contains "the plain diff lands in a.c" "$T23/A/fake/src/a.c" \
+    "int gamma = 42;"
+expect_file_not_contains "the plain diff leaves no pre-image" \
+    "$T23/A/fake/src/a.c" "int gamma = 1;"
+expect_file_contains "the plain diff lands in b.c" "$T23/A/fake/src/b.c" \
+    "line one v2"
+if grep -qE '^(Added|Removed|Renamed): ' "$T23/A/.fake.projeny.status"; then
+    fail "a modify-only plain diff records no adds/deletes/renames" \
+        "$(grep -E '^(Added|Removed|Renamed): ' "$T23/A/.fake.projeny.status")"
+else
+    ok "a modify-only plain diff records no adds/deletes/renames"
+fi
+run_in "$T23/A" expect_ok "re-applying the plain diff is idempotent" \
+    "$PROJENY" apply fake.projeny "$T23/plain.diff"
+if [ "$(grep -c 'int gamma = 42;' "$T23/A/fake/src/a.c")" -eq 1 ]; then
+    ok "the idempotent re-apply does not duplicate content"
+else
+    fail "the idempotent re-apply does not duplicate content" \
+        "$(cat "$T23/A/fake/src/a.c")"
+fi
+# The `patch` command takes the same input on a bare directory (the
+# pristine B copy).
+p2out="$(run_in "$T23" "$PROJENY" patch B/fake "$T23/plain.diff" 2>&1)"
+p2rc=$?
+if [ $p2rc -eq 0 ]; then
+    ok "the patch command takes the plain unified diff"
+else
+    fail "the patch command takes the plain unified diff" \
+        "exit=$p2rc out: $p2out"
+fi
+case "$p2out" in
+*"patched 'B/fake'"*)
+    ok "the patch command reports a clean patch"
+    ;;
+*)
+    fail "the patch command reports a clean patch" "out: $p2out"
+    ;;
+esac
+expect_file_contains "the patched tree holds the a.c change" \
+    "$T23/B/fake/src/a.c" "int gamma = 42;"
+expect_file_contains "the patched tree holds the b.c change" \
+    "$T23/B/fake/src/b.c" "line one v2"
+# GNU patch parity for the prose-prefixed two-block diff.
+if command -v patch >/dev/null 2>&1; then
+    grc=0
+    ( cd "$T23/C/fake" && \
+        patch --no-backup-if-mismatch -p1 < "$T23/plain.diff" >/dev/null 2>&1 ) || \
+        grc=$?
+    if [ $grc -eq 0 ]; then
+        ok "GNU patch applies the plain unified diff"
+    else
+        fail "GNU patch applies the plain unified diff" "exit=$grc"
+    fi
+    if diff -r "$T23/A/fake" "$T23/C/fake" >/dev/null; then
+        ok "GNU patch and projeny agree byte-for-byte on the plain diff"
+    else
+        fail "GNU patch and projeny agree byte-for-byte on the plain diff" \
+            "$(diff -r "$T23/A/fake" "$T23/C/fake" 2>&1 | head -5)"
+    fi
+else
+    ok "GNU patch plain-diff parity (skipped: no patch)"
+fi
+# Hunk-less /dev/null pairs: create an empty file, delete a file; the
+# status file books both (GNU patch refuses this shape outright — see the
+# section comment — so there is no parity check here).
+cat > "$T23/empty.diff" <<'EOF'
+--- /dev/null
++++ b/src/new.txt
+--- a/src/b.c
++++ /dev/null
+EOF
+run_in "$T23/A" expect_ok "a hunk-less add/delete diff applies" "$PROJENY" \
+    apply fake.projeny "$T23/empty.diff"
+if [ -f "$T23/A/fake/src/new.txt" ] && [ ! -s "$T23/A/fake/src/new.txt" ]; then
+    ok "the hunk-less add creates an empty file"
+else
+    fail "the hunk-less add creates an empty file" \
+        "ls: $(ls "$T23/A/fake/src" 2>&1)"
+fi
+if [ ! -e "$T23/A/fake/src/b.c" ]; then
+    ok "the hunk-less delete removes the file"
+else
+    fail "the hunk-less delete removes the file" "src/b.c still exists"
+fi
+expect_file_contains "the hunk-less add is marked" \
+    "$T23/A/.fake.projeny.status" "Added: src/new.txt"
+expect_file_contains "the hunk-less delete is marked" \
+    "$T23/A/.fake.projeny.status" "Removed: src/b.c"
+# Label-pair-looking lines inside a hunk body are content: the body is read
+# exactly to its @@ counts, so a removed "--- a/fake-in-hunk" and an added
+# "+++ b/fake-in-hunk" neither start a block nor retarget anything. The
+# hunk's pre-image is written over a.c first, and a pristine copy of that
+# state goes to D for the GNU parity run.
+printf 'int alpha = 1;\n-- a/fake-in-hunk\nint beta = 1;\n\nint gamma = 1;\n\nint delta = 1;\n' \
+    > "$T23/A/fake/src/a.c"
+rm -rf "$T23/D" && mkdir -p "$T23/D" && cp -r "$T23/A/fake" "$T23/D/fake"
+printf '%s\n' \
+    '--- a/src/a.c' \
+    '+++ b/src/a.c' \
+    '@@ -1,7 +1,7 @@' \
+    ' int alpha = 1;' \
+    '--- a/fake-in-hunk' \
+    '+++ b/fake-in-hunk' \
+    ' int beta = 1;' \
+    ' ' \
+    ' int gamma = 1;' \
+    ' ' \
+    ' int delta = 1;' \
+    > "$T23/inhunk.diff"
+run_in "$T23/A" expect_ok "a diff with label pairs inside a hunk applies" \
+    "$PROJENY" apply fake.projeny "$T23/inhunk.diff"
+if [ "$(sed -n 2p "$T23/A/fake/src/a.c")" = "++ b/fake-in-hunk" ]; then
+    ok "the in-hunk label pair lands as hunk content"
+else
+    fail "the in-hunk label pair lands as hunk content" \
+        "$(cat "$T23/A/fake/src/a.c")"
+fi
+if [ ! -e "$T23/A/fake/fake-in-hunk" ] && \
+   [ ! -e "$T23/A/fake/src/fake-in-hunk" ] && \
+   [ ! -e "$T23/A/fake/src/a.c.orig" ] && \
+   [ ! -e "$T23/A/fake/src/a.c.rej" ]; then
+    ok "the in-hunk label pair creates nothing else"
+else
+    fail "the in-hunk label pair creates nothing else" \
+        "ls: $(ls "$T23/A/fake" "$T23/A/fake/src" 2>&1)"
+fi
+if command -v patch >/dev/null 2>&1; then
+    grc=0
+    ( cd "$T23/D/fake" && \
+        patch --no-backup-if-mismatch -p1 < "$T23/inhunk.diff" >/dev/null 2>&1 ) || \
+        grc=$?
+    if [ $grc -eq 0 ]; then
+        ok "GNU patch applies the in-hunk label pair diff"
+    else
+        fail "GNU patch applies the in-hunk label pair diff" "exit=$grc"
+    fi
+    if diff -r "$T23/A/fake" "$T23/D/fake" >/dev/null; then
+        ok "GNU patch and projeny agree on the in-hunk result"
+    else
+        fail "GNU patch and projeny agree on the in-hunk result" \
+            "$(diff -r "$T23/A/fake" "$T23/D/fake" 2>&1 | head -5)"
+    fi
+else
+    ok "GNU patch in-hunk parity (skipped: no patch)"
+fi
+# Gate regressions: a ---/+++ pair with neither a following @@ nor a
+# /dev/null side is prose, not a block — the patch is refused, and so is
+# one whose pair is followed by a non-hunk line.
+printf 'cover note\n\n--- not a real file\n+++ also not\n' > "$T23/gate1.diff"
+g1out="$(run_in "$T23/A" "$PROJENY" apply fake.projeny \
+    "$T23/gate1.diff" 2>&1 || true)"
+case "$g1out" in
+*"contains no diff blocks"*)
+    ok "a prose label pair with no hunk is refused"
+    ;;
+*)
+    fail "a prose label pair with no hunk is refused" "out: $g1out"
+    ;;
+esac
+printf -- '--- x\n+++ y\nhello world\n' > "$T23/gate2.diff"
+g2out="$(run_in "$T23/A" "$PROJENY" apply fake.projeny \
+    "$T23/gate2.diff" 2>&1 || true)"
+case "$g2out" in
+*"contains no diff blocks"*)
+    ok "a label pair followed by a non-hunk line is refused"
+    ;;
+*)
+    fail "a label pair followed by a non-hunk line is refused" "out: $g2out"
+    ;;
+esac
+# Checkout-name (wid) labels: a plain diff produced against the checkout
+# directory itself labels paths a/<wid>/..., which strips down to the same
+# member (fresh checkout E, so the hunk's pre-image is the pristine file).
+mkdir -p "$T23/E"
+cp "$T23/fake-1.0.tar.gz" "$T23/E/"
+write_projeny "$T23/E" fake 1.0 fake
+run_in "$T23/E" expect_ok "wid fixture setup" "$PROJENY" setup fake.projeny
+printf '%s\n' \
+    'A prose preamble: this diff was produced against the checkout directory' \
+    'itself, so its labels carry the checkout name, fake.' \
+    '' \
+    '--- a/fake/src/a.c' \
+    '+++ b/fake/src/a.c' \
+    '@@ -1,7 +1,7 @@' \
+    ' int alpha = 1;' \
+    ' ' \
+    ' int beta = 1;' \
+    ' ' \
+    ' int gamma = 1;' \
+    ' ' \
+    '-int delta = 1;' \
+    '+int delta = 9;' \
+    > "$T23/wid.diff"
+run_in "$T23/E" expect_ok "a wid-prefixed plain diff applies" "$PROJENY" \
+    apply fake.projeny "$T23/wid.diff"
+expect_file_contains "the wid-prefixed diff lands" "$T23/E/fake/src/a.c" \
+    "int delta = 9;"
+
+# ------------------- 324. plain unified diff round-trip through commit
+#
+# A plain unified diff applied inside a checkout books its content as an
+# ordinary workdir modification: the next commit folds it into the .projeny
+# patch (re-derived in projeny's own git format), status reads clean, and
+# the change survives the erase-setup + setup cycle.
+
+T324="$ROOT/t324"
+mkdir -p "$T324"
+make_tarballs "$T324" fake
+write_projeny "$T324" fake 1.0 fake
+run_in "$T324" expect_ok "plain-diff roundtrip fixture setup" "$PROJENY" \
+    setup fake.projeny
+printf '%s\n' \
+    'Round-trip test: a plain unified diff with a prose preamble; the patch' \
+    'itself follows.' \
+    '' \
+    '--- a/src/a.c' \
+    '+++ b/src/a.c' \
+    '@@ -1,7 +1,7 @@' \
+    ' int alpha = 1;' \
+    ' ' \
+    ' int beta = 1;' \
+    ' ' \
+    '-int gamma = 1;' \
+    '+int gamma = 42;' \
+    ' ' \
+    ' int delta = 1;' \
+    > "$T324/plain.diff"
+run_in "$T324" expect_ok "apply the plain diff before committing" "$PROJENY" \
+    apply fake.projeny "$T324/plain.diff"
+run_in "$T324" expect_ok "commit folds the plain-diff change" "$PROJENY" \
+    commit fake.projeny
+expect_file_contains "the committed patch is a git diff" \
+    "$T324/fake.projeny" "diff --git a/fake/src/a.c b/fake/src/a.c"
+expect_file_contains "the committed patch carries the applied content" \
+    "$T324/fake.projeny" "int gamma = 42;"
+sout="$(run_in "$T324" "$PROJENY" status fake.projeny 2>&1)"
+strc=$?
+case "$sout" in
+*"Modified:"*|*"Conflict:"*|*"Added:"*|*"Removed:"*|*"Renamed:"*|*"Disappeared:"*)
+    fail "status reads clean after committing the plain diff" "out: $sout"
+    ;;
+*)
+    if [ $strc -eq 0 ]; then
+        ok "status reads clean after committing the plain diff"
+    else
+        fail "status reads clean after committing the plain diff" \
+            "exit=$strc out: $sout"
+    fi
+    ;;
+esac
+run_in "$T324" expect_ok "erase-setup after the commit" "$PROJENY" \
+    erase-setup fake.projeny
+run_in "$T324" expect_ok "re-setup after the plain-diff commit" "$PROJENY" \
+    setup fake.projeny
+expect_file_contains "the re-setup checkout keeps the applied change" \
+    "$T324/fake/src/a.c" "int gamma = 42;"
+
+# ------------------- 325. plain unified diffs with prefix-free labels (the
+#                            `diff -u` / `diff -ruN` shapes)
+#
+# Plain blocks whose labels carry no a/, b/, or workdir prefix are the shape
+# `diff -u old/f new/f` and recursive `diff -ruN oldtree newtree` emit: the
+# first component is the emitter's own directory, which GNU `patch -p1`
+# strips. projeny resolves them with the tree as the guide (the whole label
+# path when it exists in the target, else one component stripped — so a
+# genuinely tree-relative label like `--- src/a.c` stays whole), falling
+# back to the patch's first decidable block and, when nothing is decidable,
+# to a first-component probe. `diff -N` also marks the NONEXISTENT side of
+# an add/delete block with the epoch timestamp 1970-01-01 00:00:00 +0000
+# (instead of /dev/null); GNU patch reads those stamps and removes a file a
+# patch empties when the plus side is epoch-marked, and creates the file a
+# patch adds when the minus side is. projeny reads the same stamps: an
+# epoch-marked side parses as missing, so the block applies as a creation
+# or a removal. Blocks whose both sides carry real (non-epoch) timestamps
+# apply as ordinary modifications — a file emptied that way stays on disk
+# EMPTY (GNU patch leaves it too, calibrated). Timestamps ride after a TAB
+# on the label line; every stamp-bearing patch below is built with
+# printf '%b\n' and its tabs are asserted before anything is applied.
+
+T325="$ROOT/t325"
+mkdir -p "$T325"
+make_tarballs "$T325" fake
+write_projeny "$T325" fake 1.0 fake
+T325_STAMP='2030-01-01 12:00:00.000000000 +0000'
+T325_STAMP2='2030-01-02 12:00:00.000000000 +0000'
+T325_EPOCH='1970-01-01 00:00:00.000000000 +0000'
+
+# --- T1: a hand-written `diff -ruN` shape (modify + delete + add), labels
+#     without a/b prefixes, GNU `diff -ruN` command lines between blocks.
+mkdir -p "$T325/A"
+make_tarballs "$T325/A" fake
+write_projeny "$T325/A" fake 1.0 fake
+run_in "$T325/A" expect_ok "325 fixture A setup" "$PROJENY" setup fake.projeny
+mkdir -p "$T325/A/fake/sub"
+printf 'alpha\nbeta\ngamma\n' > "$T325/A/fake/sub/m.txt"
+printf 'gone\n' > "$T325/A/fake/sub/gone.txt"
+printf '%b\n' \
+    'diff -ruN oldtree/sub/m.txt newtree/sub/m.txt' \
+    "--- oldtree/sub/m.txt\t$T325_STAMP" \
+    "+++ newtree/sub/m.txt\t$T325_STAMP2" \
+    '@@ -1,3 +1,3 @@' \
+    ' alpha' \
+    ' beta' \
+    '-gamma' \
+    '+GAMMA' \
+    'diff -ruN oldtree/sub/gone.txt newtree/sub/gone.txt' \
+    "--- oldtree/sub/gone.txt\t$T325_STAMP" \
+    "+++ newtree/sub/gone.txt\t$T325_EPOCH" \
+    '@@ -1 +0,0 @@' \
+    '-gone' \
+    'diff -ruN oldtree/sub/new.txt newtree/sub/new.txt' \
+    "--- oldtree/sub/new.txt\t$T325_EPOCH" \
+    "+++ newtree/sub/new.txt\t$T325_STAMP2" \
+    '@@ -0,0 +1 @@' \
+    '+fresh' \
+    > "$T325/run.diff"
+if grep -qF -- "$(printf -- '--- oldtree/sub/m.txt\t')" "$T325/run.diff"; then
+    ok "the diff -ruN labels carry tab-separated timestamps"
+else
+    fail "the diff -ruN labels carry tab-separated timestamps" \
+        "$(cat -A "$T325/run.diff" | head -4)"
+fi
+# The GNU parity copy: a pristine pre-state snapshot, taken BEFORE projeny
+# touches the tree (the patch adds and removes files, so a post-state copy
+# would lie).
+mkdir -p "$T325/G"
+cp -a "$T325/A/fake" "$T325/G/fake"
+t1out="$(run_in "$T325/A" "$PROJENY" apply fake.projeny "$T325/run.diff" 2>&1)"
+t1rc=$?
+if [ $t1rc -eq 0 ]; then
+    ok "the diff -ruN shape applies inside a checkout"
+else
+    fail "the diff -ruN shape applies inside a checkout" \
+        "exit=$t1rc out: $t1out"
+fi
+case "$t1out" in
+*conflict*)
+    fail "the diff -ruN apply reports no conflicts" "out: $t1out"
+    ;;
+*)
+    ok "the diff -ruN apply reports no conflicts"
+    ;;
+esac
+printf 'alpha\nbeta\nGAMMA\n' > "$T325/want-m.txt"
+expect_file_eq "the diff -ruN modify lands in sub/m.txt" \
+    "$T325/A/fake/sub/m.txt" "$T325/want-m.txt"
+if [ ! -e "$T325/A/fake/sub/gone.txt" ]; then
+    ok "the epoch-marked deletion removes sub/gone.txt"
+else
+    fail "the epoch-marked deletion removes sub/gone.txt" \
+        "sub/gone.txt still exists"
+fi
+printf 'fresh\n' > "$T325/want-new.txt"
+expect_file_eq "the epoch-marked add creates sub/new.txt" \
+    "$T325/A/fake/sub/new.txt" "$T325/want-new.txt"
+expect_file_contains "the status file records the created path" \
+    "$T325/A/.fake.projeny.status" "Added: sub/new.txt"
+expect_file_contains "the status file records the removed path" \
+    "$T325/A/.fake.projeny.status" "Removed: sub/gone.txt"
+if command -v patch >/dev/null 2>&1; then
+    grc=0
+    ( cd "$T325/G/fake" && \
+        patch --no-backup-if-mismatch -p1 < "$T325/run.diff" >/dev/null 2>&1 ) || \
+        grc=$?
+    if [ $grc -eq 0 ]; then
+        ok "GNU patch -p1 applies the diff -ruN shape"
+    else
+        fail "GNU patch -p1 applies the diff -ruN shape" "exit=$grc"
+    fi
+    if diff -r "$T325/A/fake" "$T325/G/fake" >/dev/null; then
+        ok "projeny and GNU patch agree byte-for-byte on the diff -ruN shape"
+    else
+        fail "projeny and GNU patch agree byte-for-byte on the diff -ruN shape" \
+            "$(diff -r "$T325/A/fake" "$T325/G/fake" 2>&1 | head -5)"
+    fi
+else
+    ok "GNU patch diff -ruN parity (skipped: no patch)"
+fi
+cp -a "$T325/A/fake" "$T325/A-snap"
+run_in "$T325/A" expect_ok "re-applying the diff -ruN shape is idempotent" \
+    "$PROJENY" apply fake.projeny "$T325/run.diff"
+if diff -r "$T325/A/fake" "$T325/A-snap" >/dev/null; then
+    ok "the idempotent re-apply leaves the tree unchanged"
+else
+    fail "the idempotent re-apply leaves the tree unchanged" \
+        "$(diff -r "$T325/A/fake" "$T325/A-snap" 2>&1 | head -5)"
+fi
+
+# --- T2: a REAL generated `diff -ruN` over the same shapes (guard: the
+#     diff binary), applied with projeny and with GNU patch.
+if command -v diff >/dev/null 2>&1; then
+    rm -rf "$T325/gen"
+    mkdir -p "$T325/gen/oldtree/sub" "$T325/gen/newtree/sub"
+    printf 'alpha\nbeta\ngamma\n' > "$T325/gen/oldtree/sub/m.txt"
+    printf 'gone\n' > "$T325/gen/oldtree/sub/gone.txt"
+    printf 'alpha\nbeta\nGAMMA\n' > "$T325/gen/newtree/sub/m.txt"
+    printf 'fresh\n' > "$T325/gen/newtree/sub/new.txt"
+    ( cd "$T325/gen" && diff -ruN oldtree newtree > "$T325/real.diff" ) || true
+    if grep -q '^--- oldtree/sub/' "$T325/real.diff" && \
+        grep -q '^+++ newtree/sub/' "$T325/real.diff"; then
+        ok "the generated diff -ruN carries prefix-free oldtree/newtree labels"
+    else
+        fail "the generated diff -ruN carries prefix-free oldtree/newtree labels" \
+            "$(head -6 "$T325/real.diff")"
+    fi
+    if grep -q '1970-01-01 00:00:00' "$T325/real.diff"; then
+        ok "the generated diff -ruN epoch-marks the nonexistent sides"
+    else
+        fail "the generated diff -ruN epoch-marks the nonexistent sides" \
+            "$(cat -A "$T325/real.diff" | head -6)"
+    fi
+    mkdir -p "$T325/B"
+    make_tarballs "$T325/B" fake
+    write_projeny "$T325/B" fake 1.0 fake
+    run_in "$T325/B" expect_ok "325 fixture B setup" "$PROJENY" setup fake.projeny
+    mkdir -p "$T325/B/fake/sub"
+    printf 'alpha\nbeta\ngamma\n' > "$T325/B/fake/sub/m.txt"
+    printf 'gone\n' > "$T325/B/fake/sub/gone.txt"
+    if command -v patch >/dev/null 2>&1; then
+        mkdir -p "$T325/H"
+        cp -a "$T325/B/fake" "$T325/H/fake"
+    fi
+    run_in "$T325/B" expect_ok "the real generated diff -ruN applies" \
+        "$PROJENY" apply fake.projeny "$T325/real.diff"
+    expect_file_eq "the real diff -ruN modify lands" \
+        "$T325/B/fake/sub/m.txt" "$T325/want-m.txt"
+    expect_file_eq "the real diff -ruN add lands" \
+        "$T325/B/fake/sub/new.txt" "$T325/want-new.txt"
+    if [ ! -e "$T325/B/fake/sub/gone.txt" ]; then
+        ok "the real diff -ruN delete removes the file"
+    else
+        fail "the real diff -ruN delete removes the file" "still exists"
+    fi
+    if command -v patch >/dev/null 2>&1; then
+        grc=0
+        ( cd "$T325/H/fake" && \
+            patch --no-backup-if-mismatch -p1 < "$T325/real.diff" >/dev/null 2>&1 ) || \
+            grc=$?
+        if [ $grc -eq 0 ]; then
+            ok "GNU patch -p1 applies the real generated diff -ruN"
+        else
+            fail "GNU patch -p1 applies the real generated diff -ruN" "exit=$grc"
+        fi
+        if diff -r "$T325/B/fake" "$T325/H/fake" >/dev/null; then
+            ok "projeny and GNU patch agree on the real generated diff -ruN"
+        else
+            fail "projeny and GNU patch agree on the real generated diff -ruN" \
+                "$(diff -r "$T325/B/fake" "$T325/H/fake" 2>&1 | head -5)"
+        fi
+    else
+        ok "GNU patch real diff -ruN parity (skipped: no patch)"
+    fi
+else
+    ok "real generated diff -ruN (skipped: no diff)"
+fi
+
+# --- T3: the `diff -u w2/f.txt w/f.txt` shape with two hunks, hand-written.
+mkdir -p "$T325/C"
+make_tarballs "$T325/C" fake
+write_projeny "$T325/C" fake 1.0 fake
+run_in "$T325/C" expect_ok "325 fixture C setup" "$PROJENY" setup fake.projeny
+printf 'one\ntwo\nthree\nfour\nfive\nsix\n' > "$T325/C/fake/f.txt"
+printf '%b\n' \
+    "--- w2/f.txt\t$T325_STAMP" \
+    "+++ w/f.txt\t$T325_STAMP2" \
+    '@@ -1,3 +1,3 @@' \
+    ' one' \
+    '-two' \
+    '+TWO' \
+    ' three' \
+    '@@ -4,3 +4,3 @@' \
+    ' four' \
+    '-five' \
+    '+FIVE' \
+    ' six' \
+    > "$T325/two-hunk.diff"
+if command -v patch >/dev/null 2>&1; then
+    mkdir -p "$T325/C-G"
+    cp -a "$T325/C/fake" "$T325/C-G/fake"
+fi
+run_in "$T325/C" expect_ok "the two-hunk prefix-free diff applies" \
+    "$PROJENY" apply fake.projeny "$T325/two-hunk.diff"
+printf 'one\nTWO\nthree\nfour\nFIVE\nsix\n' > "$T325/want-f.txt"
+expect_file_eq "the two-hunk diff lands both hunks" \
+    "$T325/C/fake/f.txt" "$T325/want-f.txt"
+if command -v patch >/dev/null 2>&1; then
+    grc=0
+    ( cd "$T325/C-G/fake" && \
+        patch --no-backup-if-mismatch -p1 < "$T325/two-hunk.diff" >/dev/null 2>&1 ) || \
+        grc=$?
+    if [ $grc -eq 0 ]; then
+        ok "GNU patch -p1 applies the two-hunk prefix-free diff"
+    else
+        fail "GNU patch -p1 applies the two-hunk prefix-free diff" "exit=$grc"
+    fi
+    if diff -r "$T325/C/fake" "$T325/C-G/fake" >/dev/null; then
+        ok "projeny and GNU patch agree on the two-hunk prefix-free diff"
+    else
+        fail "projeny and GNU patch agree on the two-hunk prefix-free diff" \
+            "$(diff -r "$T325/C/fake" "$T325/C-G/fake" 2>&1 | head -5)"
+    fi
+else
+    ok "GNU patch two-hunk parity (skipped: no patch)"
+fi
+# The same shape as a REAL `diff -u` output (real timestamps on both sides).
+if command -v diff >/dev/null 2>&1; then
+    rm -rf "$T325/gen2"
+    mkdir -p "$T325/gen2/w2" "$T325/gen2/w"
+    printf 'one\ntwo\nthree\nfour\nfive\nsix\n' > "$T325/gen2/w2/f.txt"
+    printf 'one\nTWO\nthree\nfour\nFIVE\nsix\n' > "$T325/gen2/w/f.txt"
+    ( cd "$T325/gen2" && diff -u w2/f.txt w/f.txt > "$T325/real-two-hunk.diff" ) || true
+    if grep -q '^--- w2/f.txt' "$T325/real-two-hunk.diff" && \
+        grep -q '^+++ w/f.txt' "$T325/real-two-hunk.diff"; then
+        ok "the real diff -u carries the w2/w labels"
+    else
+        fail "the real diff -u carries the w2/w labels" \
+            "$(head -2 "$T325/real-two-hunk.diff")"
+    fi
+    mkdir -p "$T325/D"
+    make_tarballs "$T325/D" fake
+    write_projeny "$T325/D" fake 1.0 fake
+    run_in "$T325/D" expect_ok "325 fixture D setup" "$PROJENY" setup fake.projeny
+    printf 'one\ntwo\nthree\nfour\nfive\nsix\n' > "$T325/D/fake/f.txt"
+    if command -v patch >/dev/null 2>&1; then
+        mkdir -p "$T325/D-G"
+        cp -a "$T325/D/fake" "$T325/D-G/fake"
+    fi
+    run_in "$T325/D" expect_ok "the real diff -u two-hunk patch applies" \
+        "$PROJENY" apply fake.projeny "$T325/real-two-hunk.diff"
+    expect_file_eq "the real diff -u lands both hunks" \
+        "$T325/D/fake/f.txt" "$T325/want-f.txt"
+    if command -v patch >/dev/null 2>&1; then
+        grc=0
+        ( cd "$T325/D-G/fake" && \
+            patch --no-backup-if-mismatch -p1 < "$T325/real-two-hunk.diff" >/dev/null 2>&1 ) || \
+            grc=$?
+        if [ $grc -eq 0 ] && diff -r "$T325/D/fake" "$T325/D-G/fake" >/dev/null; then
+            ok "GNU patch agrees on the real diff -u two-hunk patch"
+        else
+            fail "GNU patch agrees on the real diff -u two-hunk patch" \
+                "gnu-rc=$grc diff: $(diff -r "$T325/D/fake" "$T325/D-G/fake" 2>&1 | head -5)"
+        fi
+    else
+        ok "GNU patch real diff -u parity (skipped: no patch)"
+    fi
+else
+    ok "real diff -u two-hunk variant (skipped: no diff)"
+fi
+
+# --- T4: a/-prefixed labels WITH tab-timestamps still apply (the reviewer's
+#     requested shape), with and without the checkout name in the label.
+mkdir -p "$T325/E"
+make_tarballs "$T325/E" fake
+write_projeny "$T325/E" fake 1.0 fake
+run_in "$T325/E" expect_ok "325 fixture E setup" "$PROJENY" setup fake.projeny
+printf '%b\n' \
+    "--- a/src/a.c\t$T325_STAMP" \
+    "+++ b/src/a.c\t$T325_STAMP2" \
+    '@@ -1,7 +1,7 @@' \
+    ' int alpha = 1;' \
+    ' ' \
+    ' int beta = 1;' \
+    ' ' \
+    '-int gamma = 1;' \
+    '+int gamma = 43;' \
+    ' ' \
+    ' int delta = 1;' \
+    > "$T325/stamped-ab.diff"
+run_in "$T325/E" expect_ok "a stamped a/-prefixed plain diff applies" \
+    "$PROJENY" apply fake.projeny "$T325/stamped-ab.diff"
+expect_file_contains "the stamped a/-prefixed diff lands" \
+    "$T325/E/fake/src/a.c" "int gamma = 43;"
+mkdir -p "$T325/F"
+make_tarballs "$T325/F" fake
+write_projeny "$T325/F" fake 1.0 fake
+run_in "$T325/F" expect_ok "325 fixture F setup" "$PROJENY" setup fake.projeny
+printf '%b\n' \
+    "--- a/fake/src/a.c\t$T325_STAMP" \
+    "+++ b/fake/src/a.c\t$T325_STAMP2" \
+    '@@ -1,7 +1,7 @@' \
+    ' int alpha = 1;' \
+    ' ' \
+    ' int beta = 1;' \
+    ' ' \
+    '-int gamma = 1;' \
+    '+int gamma = 44;' \
+    ' ' \
+    ' int delta = 1;' \
+    > "$T325/stamped-wid.diff"
+run_in "$T325/F" expect_ok "a stamped wid-prefixed plain diff applies" \
+    "$PROJENY" apply fake.projeny "$T325/stamped-wid.diff"
+expect_file_contains "the stamped wid-prefixed diff lands" \
+    "$T325/F/fake/src/a.c" "int gamma = 44;"
+
+# --- T5: p0 preservation. A genuinely tree-relative prefix-free label
+#     (`--- src/a.c`) stays WHOLE because the path exists in the tree —
+#     both without timestamps and with them.
+mkdir -p "$T325/G2"
+make_tarballs "$T325/G2" fake
+write_projeny "$T325/G2" fake 1.0 fake
+run_in "$T325/G2" expect_ok "325 fixture G2 setup" "$PROJENY" setup fake.projeny
+printf '%s\n' \
+    '--- src/a.c' \
+    '+++ src/a.c' \
+    '@@ -1,7 +1,7 @@' \
+    ' int alpha = 1;' \
+    ' ' \
+    ' int beta = 1;' \
+    ' ' \
+    '-int gamma = 1;' \
+    '+int gamma = 45;' \
+    ' ' \
+    ' int delta = 1;' \
+    > "$T325/p0.diff"
+run_in "$T325/G2" expect_ok "a prefix-free tree-relative diff applies in place" \
+    "$PROJENY" apply fake.projeny "$T325/p0.diff"
+expect_file_contains "the tree-relative diff lands unstripped" \
+    "$T325/G2/fake/src/a.c" "int gamma = 45;"
+printf '%b\n' \
+    "--- src/a.c\t$T325_STAMP" \
+    "+++ src/a.c\t$T325_STAMP2" \
+    '@@ -1,7 +1,7 @@' \
+    ' int alpha = 1;' \
+    ' ' \
+    ' int beta = 1;' \
+    ' ' \
+    '-int gamma = 1;' \
+    '+int gamma = 45;' \
+    ' ' \
+    ' int delta = 1;' \
+    > "$T325/p0-stamped.diff"
+mkdir -p "$T325/G3"
+make_tarballs "$T325/G3" fake
+write_projeny "$T325/G3" fake 1.0 fake
+run_in "$T325/G3" expect_ok "325 fixture G3 setup" "$PROJENY" setup fake.projeny
+run_in "$T325/G3" expect_ok \
+    "a stamped tree-relative diff applies in place too" \
+    "$PROJENY" apply fake.projeny "$T325/p0-stamped.diff"
+expect_file_contains "the stamped tree-relative diff lands unstripped" \
+    "$T325/G3/fake/src/a.c" "int gamma = 45;"
+
+# --- T6: a lone `diff -ruN` add. Nothing in the patch is decidable by the
+#     tree, so the first-component probe strips the emitter directory —
+#     exactly what GNU patch -p1 does.
+mkdir -p "$T325/I"
+make_tarballs "$T325/I" fake
+write_projeny "$T325/I" fake 1.0 fake
+run_in "$T325/I" expect_ok "325 fixture I setup" "$PROJENY" setup fake.projeny
+printf '%b\n' \
+    'diff -ruN oldtree/sub/new.txt newtree/sub/new.txt' \
+    "--- oldtree/sub/new.txt\t$T325_EPOCH" \
+    "+++ newtree/sub/new.txt\t$T325_STAMP2" \
+    '@@ -0,0 +1 @@' \
+    '+fresh' \
+    > "$T325/lone-add.diff"
+if command -v patch >/dev/null 2>&1; then
+    mkdir -p "$T325/I-G"
+    cp -a "$T325/I/fake" "$T325/I-G/fake"
+fi
+run_in "$T325/I" expect_ok "a lone diff -ruN add applies to a fresh checkout" \
+    "$PROJENY" apply fake.projeny "$T325/lone-add.diff"
+expect_file_eq "the lone add creates sub/new.txt" \
+    "$T325/I/fake/sub/new.txt" "$T325/want-new.txt"
+if command -v patch >/dev/null 2>&1; then
+    grc=0
+    ( cd "$T325/I-G/fake" && \
+        patch --no-backup-if-mismatch -p1 < "$T325/lone-add.diff" >/dev/null 2>&1 ) || \
+        grc=$?
+    if [ $grc -eq 0 ] && diff -r "$T325/I/fake" "$T325/I-G/fake" >/dev/null; then
+        ok "GNU patch -p1 agrees on the lone diff -ruN add"
+    else
+        fail "GNU patch -p1 agrees on the lone diff -ruN add" \
+            "gnu-rc=$grc diff: $(diff -r "$T325/I/fake" "$T325/I-G/fake" 2>&1 | head -5)"
+    fi
+else
+    ok "GNU patch lone-add parity (skipped: no patch)"
+fi
+
+# --- T7: a modify that EMPTIES a file with real (non-epoch) timestamps on
+#     both sides leaves the file on disk EMPTY — in projeny and in GNU
+#     patch (the epoch stamp is what makes GNU remove it; calibrated).
+mkdir -p "$T325/J"
+make_tarballs "$T325/J" fake
+write_projeny "$T325/J" fake 1.0 fake
+run_in "$T325/J" expect_ok "325 fixture J setup" "$PROJENY" setup fake.projeny
+mkdir -p "$T325/J/fake/sub"
+printf 'content\n' > "$T325/J/fake/sub/emptying.txt"
+if command -v patch >/dev/null 2>&1; then
+    mkdir -p "$T325/J-G"
+    cp -a "$T325/J/fake" "$T325/J-G/fake"
+fi
+printf '%b\n' \
+    "--- sub/emptying.txt\t$T325_STAMP" \
+    "+++ sub/emptying.txt\t$T325_STAMP2" \
+    '@@ -1 +0,0 @@' \
+    '-content' \
+    > "$T325/emptying.diff"
+run_in "$T325/J" expect_ok "the emptying modify applies" \
+    "$PROJENY" apply fake.projeny "$T325/emptying.diff"
+if [ -f "$T325/J/fake/sub/emptying.txt" ] && [ ! -s "$T325/J/fake/sub/emptying.txt" ]; then
+    ok "a real-timestamp emptying leaves the file empty (not removed)"
+else
+    fail "a real-timestamp emptying leaves the file empty (not removed)" \
+        "ls: $(ls -la "$T325/J/fake/sub" 2>&1)"
+fi
+if command -v patch >/dev/null 2>&1; then
+    grc=0
+    ( cd "$T325/J-G/fake" && \
+        patch --no-backup-if-mismatch -p0 < "$T325/emptying.diff" >/dev/null 2>&1 ) || \
+        grc=$?
+    if [ $grc -eq 0 ] && [ -f "$T325/J-G/fake/sub/emptying.txt" ] && \
+        [ ! -s "$T325/J-G/fake/sub/emptying.txt" ]; then
+        ok "GNU patch also leaves the emptied file on disk (parity)"
+    else
+        fail "GNU patch also leaves the emptied file on disk (parity)" \
+            "gnu-rc=$grc ls: $(ls -la "$T325/J-G/fake/sub" 2>&1)"
+    fi
+else
+    ok "GNU patch emptying parity (skipped: no patch)"
+fi
+
+# --- T8: an epoch stamp on a MODIFY's old side is NOT a creation marker.
+#     A real file can genuinely carry an epoch mtime, so plain `diff -u`
+#     stamps a modify's --- side with the epoch too; GNU patch applies
+#     that as a modify (calibrated), so projeny believes the epoch stamp
+#     only for hunks shaped like a creation or a removal.
+mkdir -p "$T325/K"
+make_tarballs "$T325/K" fake
+write_projeny "$T325/K" fake 1.0 fake
+run_in "$T325/K" expect_ok "325 fixture K setup" "$PROJENY" setup fake.projeny
+mkdir -p "$T325/K/fake/sub"
+printf 'a\nb\nc\n' > "$T325/K/fake/sub/ep.txt"
+printf '%b\n' \
+    "--- sub/ep.txt\t$T325_EPOCH" \
+    "+++ sub/ep.txt\t$T325_STAMP2" \
+    '@@ -1,3 +1,3 @@' \
+    ' a' \
+    ' b' \
+    '-c' \
+    '+C' \
+    > "$T325/epoch-modify.diff"
+run_in "$T325/K" expect_ok "an epoch-stamped modify still applies as a modify" \
+    "$PROJENY" apply fake.projeny "$T325/epoch-modify.diff"
+printf 'a\nb\nC\n' > "$T325/want-ep.txt"
+expect_file_eq "the epoch-stamped modify lands in place" \
+    "$T325/K/fake/sub/ep.txt" "$T325/want-ep.txt"
+if [ ! -e "$T325/K/fake/sub/ep.txt.new" ] && [ ! -e "$T325/K/fake/sub/newf" ]; then
+    ok "the epoch-stamped modify creates no stray file"
+else
+    fail "the epoch-stamped modify creates no stray file" \
+        "ls: $(ls "$T325/K/fake/sub" 2>&1)"
+fi
+if command -v patch >/dev/null 2>&1; then
+    mkdir -p "$T325/K-G"
+    cp -a "$T325/K/fake" "$T325/K-G/fake"
+    printf 'a\nb\nc\n' > "$T325/K-G/fake/sub/ep.txt"
+    grc=0
+    ( cd "$T325/K-G/fake" && \
+        patch --no-backup-if-mismatch -p0 < "$T325/epoch-modify.diff" >/dev/null 2>&1 ) || \
+        grc=$?
+    if [ $grc -eq 0 ] && diff -r "$T325/K/fake" "$T325/K-G/fake" >/dev/null; then
+        ok "GNU patch agrees the epoch-stamped modify is a modify"
+    else
+        fail "GNU patch agrees the epoch-stamped modify is a modify" \
+            "gnu-rc=$grc diff: $(diff -r "$T325/K/fake" "$T325/K-G/fake" 2>&1 | head -5)"
+    fi
+else
+    ok "GNU patch epoch-modify parity (skipped: no patch)"
+fi
+
+# ------------------- 326. plain blocks never rename (differing sides apply
+#                            to the old name)
+#
+# A plain block (no diff --git header) has no rename syntax: GNU diff never
+# emits one, and GNU patch applies a block whose --- and +++ labels name
+# DIFFERENT paths to the OLD name ("patching file <old name>"). The block
+# must therefore never move, create, or write its post-image to the
+# new-side path — that would clobber an unrelated file the labels merely
+# name (the `--- a.txt` / `+++ b.txt` patch over a tree holding an
+# unrelated b.txt) or leave the old side unpatched beside a spurious copy.
+# projeny collapses such a block's sides to the old name at parse time, so
+# the applier, the touched-path queries, the status bookkeeping (no
+# Added/Removed/Renamed marks — nothing was added, removed, or renamed),
+# and the failure display all see a plain old-name modify. Git-style
+# blocks keep the differing-sides rename behavior, and explicit
+# `rename from/to` headers keep renaming everywhere. GNU `patch -p1`
+# REFUSES these shapes (it cannot resolve the labels) — the documented
+# divergence — so the parity pins below use -p0, which applies to the old
+# name exactly like projeny.
+
+T326="$ROOT/t326"
+mkdir -p "$T326"
+# F1's fixture: the archive carries a.txt (the plain patch's old side) and
+# b.txt (the unrelated new-side name) so the erase-setup+setup round-trip
+# restores both while the committed patch carries only a.txt's hunk.
+mkdir -p "$T326/tb/fake-1.0/src"
+printf 'int alpha = 1;\n\nint beta = 1;\n\nint gamma = 1;\n\nint delta = 1;\n' \
+    > "$T326/tb/fake-1.0/src/a.c"
+printf 'line one v1\n' > "$T326/tb/fake-1.0/src/b.c"
+printf 'hello v1\n' > "$T326/tb/fake-1.0/README"
+printf 'alpha one\nalpha two\n' > "$T326/tb/fake-1.0/a.txt"
+printf 'unrelated b\n' > "$T326/tb/fake-1.0/b.txt"
+(cd "$T326/tb" && tar -czf "$T326/fake-1.0.tar.gz" fake-1.0)
+rm -rf "$T326/tb"
+write_projeny "$T326" fake 1.0 fake
+run_in "$T326" expect_ok "326 fixture setup" "$PROJENY" setup fake.projeny
+# The pre-image is rewritten (byte-identical to the archive's copy) so the
+# starting state of both sides is pinned right here.
+printf 'alpha one\nalpha two\n' > "$T326/fake/a.txt"
+printf 'unrelated b\n' > "$T326/fake/b.txt"
+printf '%s\n' \
+    '--- a.txt' \
+    '+++ b.txt' \
+    '@@ -1,2 +1,2 @@' \
+    ' alpha one' \
+    '-alpha two' \
+    '+alpha TWO' \
+    > "$T326/plain-sides.diff"
+printf 'alpha one\nalpha TWO\n' > "$T326/want-a.txt"
+printf 'unrelated b\n' > "$T326/want-b.txt"
+t326f1="$(run_in "$T326" "$PROJENY" apply fake.projeny \
+    "$T326/plain-sides.diff" 2>&1)"
+t326f1rc=$?
+if [ $t326f1rc -eq 0 ]; then
+    ok "the differing-sides plain patch applies"
+else
+    fail "the differing-sides plain patch applies" \
+        "exit=$t326f1rc out: $t326f1"
+fi
+case "$t326f1" in
+*conflict*)
+    fail "the differing-sides plain apply reports no conflicts" "out: $t326f1"
+    ;;
+*)
+    ok "the differing-sides plain apply reports no conflicts"
+    ;;
+esac
+expect_file_eq "the differing-sides plain patch modifies the old side" \
+    "$T326/fake/a.txt" "$T326/want-a.txt"
+expect_file_eq "the unrelated new-side file keeps its bytes (no data loss)" \
+    "$T326/fake/b.txt" "$T326/want-b.txt"
+expect_file_not_contains "the differing-sides plain apply adds no mark" \
+    "$T326/.fake.projeny.status" "Added: b.txt"
+expect_file_not_contains "the differing-sides plain apply removes no mark" \
+    "$T326/.fake.projeny.status" "Removed: a.txt"
+expect_file_not_contains "the differing-sides plain apply renames no mark" \
+    "$T326/.fake.projeny.status" "Renamed:"
+run_in "$T326" expect_ok "commit after the differing-sides plain apply" \
+    "$PROJENY" commit fake.projeny
+expect_file_contains "the committed patch carries the a.txt change" \
+    "$T326/fake.projeny" "+++ b/fake/a.txt"
+expect_file_contains "the committed patch carries the post-image" \
+    "$T326/fake.projeny" "alpha TWO"
+expect_file_not_contains "the committed patch carries no b.txt hunk" \
+    "$T326/fake.projeny" "b.txt"
+run_in "$T326" expect_ok "erase-setup after the plain-patch commit" \
+    "$PROJENY" erase-setup fake.projeny
+run_in "$T326" expect_ok "setup after the erase" "$PROJENY" setup fake.projeny
+expect_file_eq "the round-trip restores the a.txt post-image" \
+    "$T326/fake/a.txt" "$T326/want-a.txt"
+expect_file_eq "the round-trip restores b.txt byte-exact" \
+    "$T326/fake/b.txt" "$T326/want-b.txt"
+# F4: the re-apply is idempotent (Already) and touches nothing.
+run_in "$T326" expect_ok "re-applying the differing-sides plain patch is idempotent" \
+    "$PROJENY" apply fake.projeny "$T326/plain-sides.diff"
+expect_file_eq "the idempotent re-apply keeps a.txt" \
+    "$T326/fake/a.txt" "$T326/want-a.txt"
+expect_file_eq "the idempotent re-apply keeps b.txt" \
+    "$T326/fake/b.txt" "$T326/want-b.txt"
+
+# --- F2: the same patch via `projeny patch` on a fresh directory holding
+#     ONLY the old side: the old name is patched, the new-side name is not
+#     created.
+rm -rf "$T326/f2"
+mkdir -p "$T326/f2"
+printf 'alpha one\nalpha two\n' > "$T326/f2/a.txt"
+run_in "$T326" expect_ok "patch applies the differing-sides plain block to the old name" \
+    "$PROJENY" patch "$T326/f2" "$T326/plain-sides.diff"
+expect_file_eq "patch lands the post-image in a.txt" \
+    "$T326/f2/a.txt" "$T326/want-a.txt"
+if [ ! -e "$T326/f2/b.txt" ]; then
+    ok "patch creates no b.txt"
+else
+    fail "patch creates no b.txt" "b.txt exists"
+fi
+
+# --- F5: GNU patch -p0 cross-check for F2 (GNU -p1 refuses this shape —
+#     the documented divergence — so -p0 is the parity pin).
+if command -v patch >/dev/null 2>&1; then
+    rm -rf "$T326/f2-g"
+    mkdir -p "$T326/f2-g"
+    printf 'alpha one\nalpha two\n' > "$T326/f2-g/a.txt"
+    grc=0
+    ( cd "$T326/f2-g" && \
+        patch --no-backup-if-mismatch -p0 < "$T326/plain-sides.diff" >/dev/null 2>&1 ) || \
+        grc=$?
+    if [ $grc -eq 0 ]; then
+        ok "GNU patch -p0 applies the differing-sides plain patch"
+    else
+        fail "GNU patch -p0 applies the differing-sides plain patch" \
+            "exit=$grc"
+    fi
+    if diff -r "$T326/f2" "$T326/f2-g" >/dev/null; then
+        ok "projeny and GNU patch -p0 agree on the differing-sides plain patch"
+    else
+        fail "projeny and GNU patch -p0 agree on the differing-sides plain patch" \
+            "$(diff -r "$T326/f2" "$T326/f2-g" 2>&1 | head -5)"
+    fi
+else
+    ok "GNU patch -p0 differing-sides parity (skipped: no patch)"
+fi
+
+# --- F3: tab-stamped labels over nested names (`w2/g.txt` / `w/g.txt`):
+#     the tree holds the old side, so the block patches it in place and
+#     never creates the new-side directory.
+T326_STAMP='2030-01-01 12:00:00.000000000 +0000'
+T326_STAMP2='2030-01-02 12:00:00.000000000 +0000'
+mkdir -p "$T326/F3"
+make_tarballs "$T326/F3" fake
+write_projeny "$T326/F3" fake 1.0 fake
+run_in "$T326/F3" expect_ok "326 fixture F3 setup" "$PROJENY" setup fake.projeny
+mkdir -p "$T326/F3/fake/w2"
+printf 'p1\np2\n' > "$T326/F3/fake/w2/g.txt"
+printf 'top level g\n' > "$T326/F3/fake/g.txt"
+printf '%b\n' \
+    "--- w2/g.txt\t$T326_STAMP" \
+    "+++ w/g.txt\t$T326_STAMP2" \
+    '@@ -1,2 +1,2 @@' \
+    ' p1' \
+    '-p2' \
+    '+P2' \
+    > "$T326/nested.diff"
+if grep -qF -- "$(printf -- '--- w2/g.txt\t')" "$T326/nested.diff"; then
+    ok "the nested differing-sides labels carry tab-separated timestamps"
+else
+    fail "the nested differing-sides labels carry tab-separated timestamps" \
+        "$(cat -A "$T326/nested.diff" | head -4)"
+fi
+run_in "$T326/F3" expect_ok "the nested differing-sides plain patch applies" \
+    "$PROJENY" apply fake.projeny "$T326/nested.diff"
+printf 'p1\nP2\n' > "$T326/want-g.txt"
+expect_file_eq "the nested differing-sides patch modifies w2/g.txt in place" \
+    "$T326/F3/fake/w2/g.txt" "$T326/want-g.txt"
+printf 'top level g\n' > "$T326/want-topg.txt"
+expect_file_eq "the nested differing-sides patch leaves g.txt alone" \
+    "$T326/F3/fake/g.txt" "$T326/want-topg.txt"
+if [ ! -e "$T326/F3/fake/w" ]; then
+    ok "the nested differing-sides patch creates no w/ directory"
+else
+    fail "the nested differing-sides patch creates no w/ directory" \
+        "w/ exists"
+fi
 
 # ------------------------------------------------------------- summary
 echo "---"

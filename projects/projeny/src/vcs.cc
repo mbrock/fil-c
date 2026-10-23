@@ -666,7 +666,8 @@ namespace {
 // rename sources through the committed patch, which needs the patch parser
 // defined further down (same unnamed namespace, so these complete there).
 struct PBlock;
-std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid);
+std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid,
+                                const std::string& treedir);
 
 // Strictly parse a `frozen-mtime` header value: decimal digits only — no
 // sign, no whitespace, no other characters, and no overflow. strtoull would
@@ -1159,6 +1160,14 @@ struct PBlock {
     // Workdir-relative paths (wid stripped); has_old/has_new false for /dev/null.
     std::string old_rel, new_rel;
     bool has_old = false, has_new = false;
+    // Plain-block bookkeeping for the GNU patch -p1 fallback: is_plain
+    // marks a block that started at a `--- ` label (no diff --git line),
+    // and the *_strippable flags mark sides whose label carried no a/,
+    // b/, or workdir prefix, so the resolved rel is the raw label path
+    // and a one-component strip remains available when the tree shows
+    // the raw path is not there (see resolve_plain_strips).
+    bool is_plain = false;
+    bool old_strippable = false, new_strippable = false;
     bool is_rename = false;
     std::string rename_from, rename_to;
     std::string old_mode, new_mode; // "" if absent
@@ -1265,8 +1274,118 @@ void split_label_stamp_raw(const std::string& p, std::string* body,
         *stamp = "";
     } else {
         *body = p.substr(0, tab);
-        *stamp = p.substr(tab);
+        *stamp = p.substr(tab); // the tab itself stays at stamp's front
     }
+}
+
+// True when a plain block's label named its path with no a/, b/, or
+// workdir prefix, so label_to_rel stripped nothing: the rel is the raw
+// label path, and a one-component strip (GNU `patch -p1` fallback)
+// remains available if the tree shows the raw path is not there.
+bool plain_side_strippable(const std::string& body, const std::string& wid)
+{
+    std::string u = unquote_git_path(body);
+    if (u == "/dev/null")
+        return false;
+    if (u.compare(0, 2, "a/") == 0 || u.compare(0, 2, "b/") == 0)
+        return false;
+    if (!wid.empty() &&
+        (u == wid || u.compare(0, wid.size() + 1, wid + "/") == 0))
+        return false;
+    return true;
+}
+
+// True for a GNU diff timestamp stamp naming the epoch: the convention
+// `diff -N` uses to mark the side of an add/delete block that does not
+// exist ("1970-01-01 00:00:00.000000000 +0000"; GNU patch reads the same
+// stamps to decide that a file a patch empties should be removed, and
+// that a patch whose old side names the epoch creates the file). The
+// stamp is what follows the tab of a ---/+++ label, e.g.
+// "1970-01-01 00:00:00.000000000 +0000" — split_label_stamp_raw keeps
+// that tab at the front. An optional numeric UTC offset may shift the
+// wall time onto the epoch (e.g. "1970-01-01 01:00:00 +0100"), so the
+// wall-clock time minus the offset must be midnight-zero itself. Any
+// parse failure (an asctime-style stamp, trailing junk, a missing field)
+// returns false: the side then reads as existing, which is what a stamp
+// we do not understand should mean. git and projeny patches never carry
+// timestamp stamps, so this only ever fires on GNU-style input.
+bool stamp_is_epoch(const std::string& stamp)
+{
+    size_t b = stamp.find_first_not_of(" \t");
+    if (b == std::string::npos)
+        return false;
+    const char* p = stamp.c_str() + b;
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+    int consumed = 0;
+    // ISO form: "YYYY-MM-DD HH:MM:SS" (GNU then appends ".<nanoseconds>").
+    if (sscanf(p, "%d-%d-%d %d:%d:%d%n", &y, &mo, &d, &h, &mi, &s,
+               &consumed) != 6)
+        return false;
+    p += consumed;
+    if (*p == '.') { // fractional seconds: '.' plus one or more digits
+        ++p;
+        if (*p < '0' || *p > '9')
+            return false;
+        while (*p >= '0' && *p <= '9')
+            ++p;
+    }
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    if (*p == '+' || *p == '-') {
+        char sign = *p;
+        ++p;
+        if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9')
+            return false;
+        int oh = (p[0] - '0') * 10 + (p[1] - '0');
+        p += 2;
+        if (*p == ':')
+            ++p; // tolerate the "+HH:MM" spelling next to GNU's "+HHMM"
+        if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9')
+            return false;
+        int om = (p[0] - '0') * 10 + (p[1] - '0');
+        p += 2;
+        if (*p != '\0' && *p != ' ' && *p != '\t')
+            return false; // trailing junk: not a stamp we claim to read
+        // Wall-clock minutes minus the offset's minutes must land exactly
+        // on the epoch ("+0100" shifts the wall time to 01:00).
+        long long wall = (long long)h * 60 + mi;
+        long long off = (long long)oh * 60 + om;
+        if (sign == '-')
+            off = -off;
+        if (wall - off != 0)
+            return false;
+    } else if (*p != '\0') {
+        return false;
+    }
+    return y == 1970 && mo == 1 && d == 1 && s == 0;
+}
+
+// True when every hunk of a block is shaped like a file creation (old side
+// empty: `@@ -0,0 +N ...`). GNU diff -N's epoch stamp decides existence
+// only for hunks shaped like this: an epoch mtime on a REAL file makes a
+// plain `diff -u` stamp that modify's old side with the epoch too, and GNU
+// patch still applies such a patch as a modify (calibrated against patch
+// 2.7.6), so the stamp alone must never turn a side missing.
+bool hunks_say_created(const std::vector<PHunk>& hunks)
+{
+    if (hunks.empty())
+        return true;
+    for (const PHunk& h : hunks)
+        if (h.old_count != 0)
+            return false;
+    return true;
+}
+
+// The removal-side counterpart: every hunk's new side empty
+// (`@@ -N +0,0 @@`), the shape of a file deletion.
+bool hunks_say_removed(const std::vector<PHunk>& hunks)
+{
+    if (hunks.empty())
+        return true;
+    for (const PHunk& h : hunks)
+        if (h.new_count != 0)
+            return false;
+    return true;
 }
 
 bool parse_hunk_header(const std::string& line, long* os, long* oc, long* ns,
@@ -1349,7 +1468,249 @@ bool parse_git_sides(const std::string& rest, std::string* a, std::string* b)
     return !a->empty() && !b->empty();
 }
 
-std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid)
+// One recognized diff block start: the line index plus the block kind
+// (combined, git-style, or plain unified — plain carries no header line,
+// so it starts at its own `--- ` label and is the only kind the GNU
+// patch -p1 fallback applies to).
+struct PatchBlockStart {
+    size_t line;
+    bool cc;
+    bool plain;
+};
+
+// The label body of a ---/+++ line: everything after the four-character
+// prefix, up to the tab that starts the optional timestamp stamp.
+std::string patch_label_body(const std::string& t)
+{
+    std::string body = t.substr(4);
+    size_t tab = body.find('\t');
+    if (tab != std::string::npos)
+        body = body.substr(0, tab);
+    return body;
+}
+
+// Find every diff block start in a raw-split patch. Three shapes count:
+//
+//   - "diff --git a/... b/..." (git-style; projeny's own format);
+//   - "diff --cc ..."/"diff --combined ..." (combined merge diffs, kept
+//     as their own always-failing blocks so per-file application reports
+//     them as a failure with a usable path instead of silently ignoring
+//     them, which would diverge from parsers that count every header);
+//   - a plain unified diff block: a "--- <label>" line followed by a
+//     "+++ <label>" line, the shape traditional diff tools emit without
+//     any "diff --git" header. Such a patch usually carries a prose
+//     preamble before the first block. A pair starts a plain block when
+//     a "@@" hunk header follows it, or when one side is /dev/null (the
+//     hunk-less empty-file add or delete GNU diff emits); a pair with
+//     neither is prose, not a block.
+//
+// Lines between blocks (a preamble, mail headers, diffstats) never start
+// blocks, and neither do ---/+++ shapes inside a hunk body: hunk bodies
+// are tracked against their @@ header's line counts, so a removed
+// "-- foo" / added "++ foo" pair inside a hunk can never be mistaken for
+// a block start. The first ---/+++ pair after a git-style or combined
+// header belongs to that block itself and never starts a plain block.
+std::vector<PatchBlockStart> find_patch_block_starts(
+    const std::vector<std::string>& lines)
+{
+    std::vector<PatchBlockStart> out;
+    bool in_hunk = false;        // inside a @@ body: counts not exhausted
+    long old_rem = 0, new_rem = 0;
+    bool labels_pending = false; // a git-style block still owes its labels
+    size_t i = 0;
+    while (i < lines.size()) {
+        std::string t = no_cr(lines[i]);
+        if (t.compare(0, 11, "diff --git ") == 0) {
+            out.push_back({i, false, false});
+            labels_pending = true;
+            in_hunk = false;
+            ++i;
+            continue;
+        }
+        if (t.compare(0, 10, "diff --cc ") == 0 ||
+            t.compare(0, 16, "diff --combined ") == 0) {
+            out.push_back({i, true, false});
+            labels_pending = true;
+            in_hunk = false;
+            ++i;
+            continue;
+        }
+        if (in_hunk) {
+            char c = t.empty() ? ' ' : t[0];
+            if (c == '\\') {
+                // "\ No newline at end of file": a marker, not body text.
+                ++i;
+                continue;
+            }
+            if (c == ' ') {
+                --old_rem;
+                --new_rem;
+            } else if (c == '-') {
+                --old_rem;
+            } else if (c == '+') {
+                --new_rem;
+            } else {
+                // Not a hunk line: the body ended early (a malformed
+                // hunk). Resume normal scanning on this same line.
+                in_hunk = false;
+                continue;
+            }
+            if (old_rem <= 0 && new_rem <= 0)
+                in_hunk = false;
+            ++i;
+            continue;
+        }
+        long os = 0, oc = 0, ns = 0, nc = 0;
+        if (parse_hunk_header(t, &os, &oc, &ns, &nc)) {
+            // A "@@" hunk header (reached here only outside a hunk body:
+            // in_hunk hands a stray header here via its early-end path).
+            // Track the body so its content cannot start blocks, and stop
+            // owing labels: a git-style block's own labels always come
+            // before its first hunk.
+            in_hunk = true;
+            old_rem = oc;
+            new_rem = nc;
+            labels_pending = false;
+            ++i;
+            continue;
+        }
+        if (t.compare(0, 4, "--- ") == 0 && i + 1 < lines.size() &&
+            no_cr(lines[i + 1]).compare(0, 4, "+++ ") == 0) {
+            if (labels_pending) {
+                // The git-style block's own labels.
+                labels_pending = false;
+                i += 2;
+                continue;
+            }
+            long os2 = 0, oc2 = 0, ns2 = 0, nc2 = 0;
+            bool hunk_follows =
+                i + 2 < lines.size() &&
+                parse_hunk_header(no_cr(lines[i + 2]), &os2, &oc2, &ns2,
+                                  &nc2);
+            bool devnull = patch_label_body(t) == "/dev/null" ||
+                           patch_label_body(no_cr(lines[i + 1])) ==
+                               "/dev/null";
+            if (hunk_follows || devnull) {
+                out.push_back({i, false, true});
+                i += 2;
+                continue;
+            }
+        }
+        ++i;
+    }
+    return out;
+}
+
+// GNU `patch -p1` fallback for plain unified blocks. A label with no
+// a/, b/, or workdir prefix is ambiguous: `diff -u old/f new/f` and
+// recursive `diff -ruN oldtree newtree` emit the emitter's own directory
+// as the first component (`--- oldtree/sub/m.txt`), which -p1 strips,
+// while a genuinely tree-relative label (`--- src/a.c`) must stay whole.
+// Decide with the tree when one is available: keep the unstripped path
+// when it exists in the tree, else strip one component when that path
+// exists. A block the tree cannot decide (either form missing — the
+// typical case is a `diff -ruN` add, whose target exists nowhere yet)
+// follows the patch's first decided block, so the add lands beside the
+// patch's modified and deleted files; when NO block can decide, a side
+// whose unstripped first component is itself absent from the tree is
+// treated as an emitter directory and stripped (the lone `diff -ruN`
+// add; a label with a single component cannot be stripped and stays).
+// Called from parse_patch when the caller supplies the tree the patch
+// targets. Callers without a tree keep raw paths: every projeny-
+// generated patch is a/-prefixed, so nothing changes for them.
+void resolve_plain_strips(std::vector<PBlock>& blocks,
+                          const std::string& treedir)
+{
+    if (treedir.empty())
+        return;
+    auto exists = [&treedir](const std::string& rel) {
+        return !rel.empty() && path_exists(join_path(treedir, rel));
+    };
+    // One-component strip of a prefix-free label: false when the label
+    // has no second component (a top-level file cannot lose its only
+    // name). A suffix of a path with no ".." cannot gain one, and
+    // check_patch_member_path already validated the whole label, so the
+    // stripped result needs no re-validation.
+    auto strip_one = [](const std::string& rel, std::string* out) {
+        size_t slash = rel.find('/');
+        if (slash == std::string::npos || slash + 1 >= rel.size())
+            return false;
+        *out = rel.substr(slash + 1);
+        return !out->empty() && *out != ".";
+    };
+    // Which strip a block wants: 0 keep, 1 strip, -1 undecided. Only a
+    // strippable side can decide; a block with no strippable side (a/-
+    // prefixed, wid-prefixed, or epoch-marked sides) is never touched.
+    auto block_verdict = [&](const PBlock& blk) {
+        int v = -1;
+        auto side = [&](bool strippable, const std::string& rel) {
+            if (!strippable || v != -1)
+                return;
+            std::string r1;
+            if (exists(rel))
+                v = 0;
+            else if (strip_one(rel, &r1) && exists(r1))
+                v = 1;
+        };
+        side(blk.old_strippable, blk.old_rel);
+        side(blk.new_strippable, blk.new_rel);
+        return v;
+    };
+    // The whole patch's verdict: the first plain block the tree can
+    // decide pins the strip convention for every undecided block.
+    int patch_verdict = -1;
+    for (const PBlock& blk : blocks) {
+        if (!blk.is_plain)
+            continue;
+        int v = block_verdict(blk);
+        if (v != -1) {
+            patch_verdict = v;
+            break;
+        }
+    }
+    // First-component probe for blocks no verdict covers: strip a side
+    // only when the whole label has a second component and its first
+    // component (the presumed emitter directory) is itself absent from
+    // the tree — a tree-relative label whose leading directory exists
+    // (or a top-level single-component label) keeps the raw path.
+    auto probe = [&](bool strippable, const std::string& rel) {
+        if (!strippable)
+            return false;
+        size_t slash = rel.find('/');
+        if (slash == std::string::npos)
+            return false; // single component: nothing to strip
+        std::string first = rel.substr(0, slash);
+        if (exists(first))
+            return false; // plausible tree directory: keep the raw path
+        std::string r1;
+        return strip_one(rel, &r1);
+    };
+    for (PBlock& blk : blocks) {
+        if (!blk.is_plain)
+            continue;
+        if (!blk.old_strippable && !blk.new_strippable)
+            continue;
+        bool strip_old = false, strip_new = false;
+        int v = block_verdict(blk);
+        if (v == -1 && patch_verdict != -1)
+            v = patch_verdict;
+        if (v != -1) {
+            strip_old = blk.old_strippable && v == 1;
+            strip_new = blk.new_strippable && v == 1;
+        } else {
+            strip_old = probe(blk.old_strippable, blk.old_rel);
+            strip_new = probe(blk.new_strippable, blk.new_rel);
+        }
+        std::string r1;
+        if (strip_old && strip_one(blk.old_rel, &r1))
+            blk.old_rel = r1;
+        if (strip_new && strip_one(blk.new_rel, &r1))
+            blk.new_rel = r1;
+    }
+}
+
+std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid,
+                                const std::string& treedir)
 {
     std::vector<PBlock> out;
     if (patch.empty())
@@ -1365,26 +1726,20 @@ std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid
     // byte-exact) and miscount the last hunk.
     std::vector<size_t> starts;
     std::vector<bool> is_cc;
-    for (size_t i = 0; i < lines.size(); ++i) {
-        std::string t = no_cr(lines[i]);
-        if (t.compare(0, 11, "diff --git ") == 0) {
-            starts.push_back(i);
-            is_cc.push_back(false);
-        } else if (t.compare(0, 10, "diff --cc ") == 0 ||
-                   t.compare(0, 16, "diff --combined ") == 0) {
-            // Combined merge diffs are not applyable; treat each as its own
-            // block so per-file application reports it as a failure with a
-            // usable path instead of silently ignoring it (which would
-            // diverge from parsers that count every diff header).
-            starts.push_back(i);
-            is_cc.push_back(true);
-        }
+    std::vector<bool> is_plain;
+    for (const PatchBlockStart& st : find_patch_block_starts(lines)) {
+        starts.push_back(st.line);
+        is_cc.push_back(st.cc);
+        is_plain.push_back(st.plain);
     }
     for (size_t s = 0; s < starts.size(); ++s) {
         size_t e = (s + 1 < starts.size()) ? starts[s + 1] : lines.size();
         PBlock blk;
         std::string first = no_cr(lines[starts[s]]);
         blk.header_line = first;
+        std::string minus_body, plus_body;
+        std::string minus_stamp, plus_stamp;
+        bool have_minus = false, have_plus = false;
         if (is_cc[s]) {
             blk.is_combined = true;
             // Combined header carries a single path ("diff --cc <path>").
@@ -1412,19 +1767,46 @@ std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid
                 blk.has_old = blk.has_new = true;
             }
             // Parse hunks below (they will not match; apply fails cleanly).
-        } else {
+        } else if (first.compare(0, 11, "diff --git ") == 0) {
             std::string rest = first.size() > 11 ? first.substr(11) : "";
             std::string ga, gb;
             if (parse_git_sides(rest, &ga, &gb)) {
                 blk.git_a = ga;
                 blk.git_b = gb;
             }
+        } else {
+            // A plain unified block starts at its own `--- ` label: the
+            // header line is the old side (the label scan below begins
+            // after it; the +++ side is picked up there). The raw line is
+            // split like any other label, so a trailing '\r' rides along
+            // as content exactly as it does for git-block labels. The
+            // timestamp stamp is kept: GNU diff's epoch stamp is what
+            // marks a nonexistent side (see the resolution below).
+            std::string body, stamp;
+            split_label_stamp_raw(lines[starts[s]].substr(4), &body, &stamp);
+            minus_body = body;
+            minus_stamp = stamp;
+            have_minus = true;
         }
-        std::string minus_body, plus_body;
-        bool have_minus = false, have_plus = false;
+        // Labels and extended headers, in block order: every well-formed
+        // emitter (git, GNU diff, projeny) writes them before the first
+        // @@ hunk. Once hunk content begins, a body line rendered as
+        // "--- x" is a REMOVED line whose text starts with "-- " (and
+        // "+++ x" an ADDED "++ x" line), never a label — so the scan
+        // stops recognizing ---/+++ (and header lines generally) at the
+        // first hunk header. Without that, a hunk that deletes such a
+        // line would silently re-target the whole block at the in-hunk
+        // text, where GNU patch sees nothing but hunk content.
+        bool in_hunk_body = false;
         for (size_t k = starts[s] + 1; k < e; ++k) {
             std::string l = lines[k];
             std::string t = no_cr(l);
+            long hos = 0, hoc = 0, hns = 0, hnc = 0;
+            if (!in_hunk_body &&
+                parse_hunk_header(t, &hos, &hoc, &hns, &hnc))
+                in_hunk_body = true; // hunk content follows; no more labels
+            if (in_hunk_body)
+                continue;
             if (t.compare(0, 9, "old mode ") == 0)
                 blk.old_mode = t.substr(9);
             else if (t.compare(0, 9, "new mode ") == 0)
@@ -1464,17 +1846,26 @@ std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid
                 // names; keep verbatim (labels never end with content '\r'
                 // except CRLF-named files, which stay consistent).
                 minus_body = body;
+                minus_stamp = stamp;
                 have_minus = true;
             } else if (t.compare(0, 4, "+++ ") == 0) {
                 std::string body, stamp;
                 split_label_stamp_raw(l.substr(4), &body, &stamp);
                 plus_body = body;
+                plus_stamp = stamp;
                 have_plus = true;
             }
         }
         // Binary payload parsing happens after the ---/+++/rename fallback
         // below (it needs no paths): see the GIT binary patch decode after
         // the hunk loop.
+        //
+        // Resolve the sides. A /dev/null side is missing, as always. A side
+        // stamped with the GNU diff -N epoch timestamp is missing TOO, but
+        // that is decided after the hunk loop below (see
+        // hunks_say_created/removed): the stamp only marks a nonexistent
+        // side for hunks shaped like a creation or a removal, and the
+        // hunks are not known yet here.
         if (have_minus) {
             bool miss = false;
             blk.old_rel = label_to_rel(minus_body, wid, &miss);
@@ -1551,8 +1942,18 @@ std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid
                 }
             }
         }
-        // Parse hunks.
+        // Parse hunks. A hunk's body is exactly its @@ header's line counts,
+        // so once both counts run out the block's remaining
+        // ' '/'-'/'+'-starting lines are prose (a trailing mail signature, a
+        // diffstat) and must be ignored — GNU patch stops reading the hunk
+        // at its counts, and find_patch_block_starts above scans the very
+        // same way. Without this, a trailing "-- " signature line became a
+        // spurious removed line (a conflict) and a diffstat line literal
+        // file content. "\ No newline" markers still attach after
+        // exhaustion, and a later "@@" header still starts the next hunk.
         PHunk* cur = nullptr;
+        long rem_old = 0, rem_new = 0;
+        bool body_done = false;
         for (size_t k = starts[s] + 1; k < e; ++k) {
             std::string l = lines[k];
             std::string t = no_cr(l);
@@ -1566,19 +1967,40 @@ std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid
                 h.new_count = nc;
                 blk.hunks.push_back(h);
                 cur = &blk.hunks.back();
+                rem_old = oc;
+                rem_new = nc;
+                body_done = rem_old <= 0 && rem_new <= 0;
                 continue;
             }
             if (!cur)
                 continue;
             if (t.empty()) {
-                cur->lines.push_back({' ', ""}); // blank context
+                if (!body_done) {
+                    cur->lines.push_back({' ', ""}); // blank context
+                    --rem_old;
+                    --rem_new;
+                    if (rem_old <= 0 && rem_new <= 0)
+                        body_done = true;
+                }
                 continue;
             }
             char c = l[0];
             if (c == ' ' || c == '-' || c == '+') {
+                if (body_done)
+                    continue; // prose past the counted body
                 // " " (lone space) is a blank context line.
                 std::string text = (l.size() == 1 && c == ' ') ? "" : l.substr(1);
                 cur->lines.push_back({c, text});
+                if (c == ' ') {
+                    --rem_old;
+                    --rem_new;
+                } else if (c == '-') {
+                    --rem_old;
+                } else {
+                    --rem_new;
+                }
+                if (rem_old <= 0 && rem_new <= 0)
+                    body_done = true;
             } else if (c == '\\') {
                 // "\ No newline at end of file": attach to previous line.
                 if (!cur->lines.empty()) {
@@ -1601,6 +2023,39 @@ std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid
                 blk.old_no_nl_file = true;
             if (h.new_no_nl)
                 blk.new_no_nl_file = true;
+        }
+        // GNU diff -N epoch sides (see stamp_is_epoch): decided here, once
+        // the hunks are known. An epoch-stamped side is nonexistent exactly
+        // like a /dev/null side — the block becomes a creation (old side)
+        // or a removal (plus side) — but only when the hunk shape agrees
+        // (hunks_say_created/removed): an epoch mtime on a REAL file makes
+        // a plain modify's stamp the epoch too, and GNU patch applies that
+        // as a modify, so the stamp alone must not turn the side missing.
+        // The label's path is kept in old_rel/new_rel so diagnostics and
+        // the side-path queries still name the file. git and projeny
+        // patches never carry timestamp stamps, so this only fires on
+        // GNU-style input.
+        if (have_minus && blk.has_old && stamp_is_epoch(minus_stamp) &&
+            hunks_say_created(blk.hunks)) {
+            blk.has_old = false;
+            blk.is_new = true;
+        }
+        if (have_plus && blk.has_new && stamp_is_epoch(plus_stamp) &&
+            hunks_say_removed(blk.hunks)) {
+            blk.has_new = false;
+            blk.is_deleted = true;
+        }
+        if (is_plain[s]) {
+            blk.is_plain = true;
+            // Only sides that still exist can be stripped: a side the
+            // epoch rule turned missing has has_old/has_new false and
+            // keeps its raw label path for diagnostics (its target is
+            // created or removed whole, so no strip decision is needed
+            // to find it — the other side's decision carries the block).
+            if (have_minus && blk.has_old)
+                blk.old_strippable = plain_side_strippable(minus_body, wid);
+            if (have_plus && blk.has_new)
+                blk.new_strippable = plain_side_strippable(plus_body, wid);
         }
         // Raw block text (for the setup/commit filters that drop blocks).
         {
@@ -1670,6 +2125,35 @@ std::vector<PBlock> parse_patch(const std::string& patch, const std::string& wid
         }
         out.push_back(blk);
     }
+    // Plain blocks with prefix-free labels may need the GNU patch -p1
+    // strip fallback; that needs the tree, so it runs here, after every
+    // block is parsed and with the caller's target tree (empty when the
+    // caller has none: raw paths stand).
+    resolve_plain_strips(out, treedir);
+    // A plain block has no rename syntax: GNU diff never emits it, and GNU
+    // patch applies a differing-name block to the OLD name ("patching file
+    // <old name>"). Collapse the sides so the applier modifies the old path
+    // and can never move, create, or write the post-image to the new-side
+    // path — writing there would clobber an unrelated file the labels
+    // merely name (e.g. `--- a.txt` / `+++ b.txt` over a tree that holds an
+    // unrelated b.txt). Runs for every caller, with or without a tree, so
+    // the applier, the touched-path queries, and the failure display all
+    // see the same collapsed block. Git-style blocks keep the
+    // differing-sides rename behavior (projeny's emitter and `git diff -M`
+    // rely on it), and explicit `rename from/to` headers keep renaming
+    // everywhere. An epoch-stamp or /dev/null side leaves the other side's
+    // rel non-empty with has_old/has_new false, so the guards skip
+    // add/delete blocks (whose missing side is the whole point).
+    for (PBlock& blk : out) {
+        if (!blk.is_plain || blk.is_rename)
+            continue;
+        if (!blk.has_old || !blk.has_new)
+            continue;
+        if (blk.old_rel.empty() || blk.new_rel.empty() ||
+            blk.old_rel == blk.new_rel)
+            continue;
+        blk.new_rel = blk.old_rel;
+    }
     return out;
 }
 
@@ -1682,7 +2166,9 @@ std::vector<std::pair<std::string, std::string>> committed_rename_pairs(
     std::vector<std::pair<std::string, std::string>> out;
     if (patch.empty())
         return out;
-    for (const PBlock& b : parse_patch(patch, wid)) {
+    // No tree here (the committed patch is projeny-generated and
+    // a/-prefixed), so plain labels keep their raw paths.
+    for (const PBlock& b : parse_patch(patch, wid, "")) {
         if (b.is_rename && b.has_old && b.has_new && !b.rename_from.empty() &&
             !b.rename_to.empty())
             out.push_back({b.rename_from, b.rename_to});
@@ -1756,7 +2242,9 @@ std::map<std::string, uint64_t> vcs_frozen_mtimes(const std::string& patch,
     std::map<std::string, uint64_t> out;
     if (patch.empty())
         return out;
-    for (const PBlock& b : parse_patch(patch, wid)) {
+    // No tree here: frozen-mtime headers only ride projeny-generated
+    // blocks, so plain labels keep their raw paths.
+    for (const PBlock& b : parse_patch(patch, wid, "")) {
         if (b.frozen_mtime == 0)
             continue;
         // A frozen attribute belongs to the block's live path: the rename
@@ -1774,7 +2262,9 @@ std::string vcs_set_frozen_mtimes(const std::string& patch, const std::string& w
 {
     if (patch.empty() && frozen.empty())
         return patch;
-    std::vector<PBlock> blocks = parse_patch(patch, wid);
+    // No tree here: the rewrite re-emits raw blocks, so plain labels keep
+    // their raw paths (projeny patches are a/-prefixed anyway).
+    std::vector<PBlock> blocks = parse_patch(patch, wid, "");
     std::string out;
     std::set<std::string> covered;
     for (const PBlock& b : blocks) {
@@ -2584,7 +3074,12 @@ BlkStatus apply_block(const std::string& treedir, const PBlock& blk,
             old_full = new_full = join_path(treedir, blk.old_rel);
             have_old_path = have_new_path = true;
         } else if (!blk.old_rel.empty() && !blk.new_rel.empty()) {
-            // Non-rename with differing sides: treat as rename.
+            // Git-style non-rename with differing sides: treat as rename.
+            // Plain blocks never get here — parse_patch collapses their
+            // sides to the old name (GNU diff has no rename syntax, and
+            // GNU patch applies a differing-name plain block to the old
+            // name), so only a diff --git header can bring two differing
+            // non-empty sides into this branch.
             old_full = join_path(treedir, blk.old_rel);
             new_full = join_path(treedir, blk.new_rel);
             have_old_path = have_new_path = true;
@@ -3162,6 +3657,10 @@ VcsFailure failure_for_block(const PBlock& blk, const std::string& wid)
             f.display = blk.old_rel;
             uniq_push(f.paths, blk.old_rel);
         } else if (!blk.old_rel.empty() && !blk.new_rel.empty()) {
+            // Git-style differing sides only: a plain block's sides are
+            // collapsed to the old name at parse time, so this arrow can
+            // never render for one (it would suggest a move the applier
+            // does not make).
             f.display = blk.old_rel + " -> " + blk.new_rel;
             uniq_push(f.paths, blk.old_rel);
             uniq_push(f.paths, blk.new_rel);
@@ -3232,14 +3731,14 @@ bool vcs_apply_whole(const std::string& treedir, const std::string& patch,
         die("patch contains NUL bytes; refusing (a well-formed patch is text: binary content travels base64-encoded)");
     // Empty modulo whitespace/comments counts as empty.
     bool any = false;
-    for (auto& b : parse_patch(patch, wid)) {
+    for (auto& b : parse_patch(patch, wid, treedir)) {
         (void)b;
         any = true;
         break;
     }
     if (!any)
         return true;
-    std::vector<PBlock> blocks = parse_patch(patch, wid);
+    std::vector<PBlock> blocks = parse_patch(patch, wid, treedir);
     for (auto& b : blocks) {
         BlkStatus st = apply_block(treedir, b, wid, mode);
         if (st == BlkStatus::Failed)
@@ -3254,7 +3753,7 @@ std::vector<VcsFailure> vcs_apply_per_file(const std::string& workdir,
                                               VcsApplyMode mode)
 {
     std::vector<VcsFailure> failed;
-    std::vector<PBlock> blocks = parse_patch(patch, wid);
+    std::vector<PBlock> blocks = parse_patch(patch, wid, workdir);
     for (size_t i = 0; i < blocks.size(); ++i) {
         BlkStatus st = apply_block(workdir, blocks[i], wid, mode);
         if (st == BlkStatus::Failed)
@@ -3473,7 +3972,7 @@ bool vcs_apply_with_conflicts(const std::string& treedir,
         return true;
     if (patch.find((char)0) != std::string::npos)
         die("patch contains NUL bytes; refusing (a well-formed patch is text: binary content travels base64-encoded)");
-    std::vector<PBlock> blocks = parse_patch(patch, wid);
+    std::vector<PBlock> blocks = parse_patch(patch, wid, treedir);
     if (blocks.empty())
         return true;
     bool all_clean = true;
@@ -3504,15 +4003,30 @@ bool vcs_apply_with_conflicts(const std::string& treedir,
     return all_clean;
 }
 
+// True when `patch` holds at least one diff block by the parser's own
+// block-start rules (git-style/combined headers and plain unified
+// ---/+++ blocks alike). The `projeny patch`/`apply` "no diff blocks"
+// gate uses this instead of its own line scan so the gate can never pass
+// text parse_patch would no-op (or refuse text parse_patch would apply).
+bool vcs_patch_has_diff_blocks(const std::string& patch)
+{
+    if (patch.empty())
+        return false;
+    if (patch.find('\0') != std::string::npos)
+        die("patch contains NUL bytes; refusing (a well-formed patch is text: binary content travels base64-encoded)");
+    return !find_patch_block_starts(split_raw(patch)).empty();
+}
+
 std::vector<std::string> vcs_touched_paths(const std::string& patch,
-                                           const std::string& wid)
+                                           const std::string& wid,
+                                           const std::string& treedir)
 {
     std::vector<std::string> out;
     if (patch.empty())
         return out;
     if (patch.find((char)0) != std::string::npos)
         die("patch contains NUL bytes; refusing (a well-formed patch is text: binary content travels base64-encoded)");
-    for (auto& b : parse_patch(patch, wid)) {
+    for (auto& b : parse_patch(patch, wid, treedir)) {
         VcsFailure f = failure_for_block(b, wid);
         for (auto& rel : f.paths) {
             if (!rel.empty() &&
@@ -3532,7 +4046,9 @@ std::string vcs_drop_deletes_not_in(const std::string& patch,
 {
     if (patch.empty())
         return patch;
-    std::vector<PBlock> blocks = parse_patch(patch, wid);
+    // No tree here (setup/commit filters on projeny-generated patches):
+    // plain labels keep their raw paths.
+    std::vector<PBlock> blocks = parse_patch(patch, wid, "");
     // All touched paths in the patch (for file/dir swap detection below).
     std::vector<std::string> touched;
     for (auto& b : blocks) {
@@ -3603,7 +4119,9 @@ std::vector<std::string> vcs_binary_add_paths(const std::string& patch,
     std::vector<std::string> out;
     if (patch.empty())
         return out;
-    for (auto& b : parse_patch(patch, wid)) {
+    // No tree here (commit's filter on a projeny-generated patch): plain
+    // labels keep their raw paths.
+    for (auto& b : parse_patch(patch, wid, "")) {
         if (b.is_combined || b.new_rel.empty())
             continue;
         // Tracked binaries: payload-carrying adds, and EVERY binary rename
@@ -3631,12 +4149,13 @@ std::vector<std::string> vcs_binary_add_paths(const std::string& patch,
 // respectively — deduplicated, in patch order.
 static std::vector<std::string> patch_side_paths(const std::string& patch,
                                                  const std::string& wid,
+                                                 const std::string& treedir,
                                                  bool adds)
 {
     std::vector<std::string> out;
     if (patch.empty())
         return out;
-    for (auto& b : parse_patch(patch, wid)) {
+    for (auto& b : parse_patch(patch, wid, treedir)) {
         bool hit;
         if (adds) {
             bool pure_add = b.is_new && !b.is_rename && !b.is_deleted &&
@@ -3667,31 +4186,38 @@ static std::vector<std::string> patch_side_paths(const std::string& patch,
 }
 
 std::vector<std::string> vcs_add_paths(const std::string& patch,
-                                       const std::string& wid)
+                                       const std::string& wid,
+                                       const std::string& treedir)
 {
-    return patch_side_paths(patch, wid, true);
+    return patch_side_paths(patch, wid, treedir, true);
 }
 
 std::vector<std::string> vcs_deleted_paths(const std::string& patch,
-                                           const std::string& wid)
+                                           const std::string& wid,
+                                           const std::string& treedir)
 {
-    return patch_side_paths(patch, wid, false);
+    return patch_side_paths(patch, wid, treedir, false);
 }
 
 std::vector<std::pair<std::string, std::string>> vcs_rename_pairs(
-    const std::string& patch, const std::string& wid)
+    const std::string& patch, const std::string& wid,
+    const std::string& treedir)
 {
     std::vector<std::pair<std::string, std::string>> out;
     if (patch.empty())
         return out;
-    for (auto& b : parse_patch(patch, wid)) {
+    for (auto& b : parse_patch(patch, wid, treedir)) {
         if (b.is_combined)
             continue;
         // Exactly the two shapes apply_block moves: headered renames
         // (projeny's emitter and `git diff -M` both write `rename from`/
         // `rename to`, and the parser wid-strips those like every other
-        // path), plus header-less blocks whose sides disagree
+        // path), plus git-style blocks whose sides disagree
         // (--- a/old +++ b/new), which the applier treats as a rename too.
+        // Plain blocks pair nothing: parse_patch collapses their sides to
+        // the old name (GNU diff has no rename syntax), so a differing-
+        // sides plain block reaches this loop with equal rels and falls to
+        // the continue below.
         std::string from, to;
         if (b.is_rename) {
             if (b.rename_from.empty() || b.rename_to.empty())
@@ -3741,7 +4267,9 @@ std::string vcs_drop_adds_not_in(const std::string& patch,
 {
     if (patch.empty())
         return patch;
-    std::vector<PBlock> blocks = parse_patch(patch, wid);
+    // No tree here (commit's filter on a projeny-generated patch): plain
+    // labels keep their raw paths.
+    std::vector<PBlock> blocks = parse_patch(patch, wid, "");
     // `keep` may hold directories (projeny add takes dirs): an add under a
     // pending-added (or rename-destination) dir is kept via under_path
     // semantics, as is_tracked_path does.
@@ -3767,7 +4295,9 @@ std::string vcs_drop_binary_adds_not_in(const std::string& patch,
 {
     if (patch.empty())
         return patch;
-    std::vector<PBlock> blocks = parse_patch(patch, wid);
+    // No tree here (commit's filter on a projeny-generated patch): plain
+    // labels keep their raw paths.
+    std::vector<PBlock> blocks = parse_patch(patch, wid, "");
     // `keep` may hold directories (projeny add takes dirs): a binary add
     // under a pending-added (or rename-destination) dir is kept via
     // under_path semantics, as is_tracked_path does.

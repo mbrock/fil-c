@@ -121,9 +121,14 @@ bool apply_patch_with_conflicts(const std::string& treedir,
                                 std::vector<std::string>* conflicts,
                                 VcsApplyMode mode);
 
-// Workdir-relative paths `patch` touches under `wid` (see vcs_touched_paths).
+// Workdir-relative paths `patch` touches under `wid` (see
+// vcs_touched_paths). treedir is the tree the patch targets: it lets
+// prefix-free plain-diff labels resolve with the GNU patch -p1 fallback;
+// pass "" when the target tree is unknown or the patch is
+// projeny-generated.
 std::vector<std::string> patch_touched_paths(const std::string& patch,
-                                             const std::string& wid);
+                                             const std::string& wid,
+                                             const std::string& treedir);
 
 // Three-way merge one file: base (may be missing), ours (fresh setup file,
 // may be missing), theirs (user file, may be missing) -> write merged result

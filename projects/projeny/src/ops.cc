@@ -2781,7 +2781,9 @@ int cmd_commit(const std::string& projeny_arg)
             del_keep.push_back(r);
         for (const auto& rn : st.renamed)
             del_keep.push_back(rn.first);
-        for (const auto& p : vcs_deleted_paths(cur.patch, cur.name)) {
+        // The committed patch is projeny-generated (a/-prefixed), so no
+        // target tree is needed to resolve its labels.
+        for (const auto& p : vcs_deleted_paths(cur.patch, cur.name, "")) {
             if (std::find(del_keep.begin(), del_keep.end(), p) == del_keep.end())
                 del_keep.push_back(p);
         }
@@ -2855,7 +2857,9 @@ int cmd_commit(const std::string& projeny_arg)
     // Previously committed adds are tracked too: the diff is
     // regenerated from scratch on every commit, so without them a
     // recommit would silently drop every committed addition.
-    for (const auto& p : vcs_add_paths(cur.patch, cur.name)) {
+    // The committed patch is projeny-generated (a/-prefixed), so no
+    // target tree is needed to resolve its labels.
+    for (const auto& p : vcs_add_paths(cur.patch, cur.name, "")) {
         if (std::find(keep.begin(), keep.end(), p) == keep.end())
             keep.push_back(p);
     }
@@ -4145,7 +4149,7 @@ std::string pick_patch_wid(const std::string& dir, const std::string& patch,
         bool have = false;
         for (auto& cand : candidates) {
             size_t hits = 0;
-            for (auto& rel : patch_touched_paths(patch, cand)) {
+            for (auto& rel : patch_touched_paths(patch, cand, dir)) {
                 if (path_exists(join_path(dir, rel)))
                     ++hits;
             }
@@ -4171,16 +4175,10 @@ int cmd_patch(const std::string& dir, const std::string& patch_file)
     if (!normalize_patch_text(patch).empty()) {
         // Refuse garbage input early: a non-empty patch file must hold at
         // least one diff block, otherwise a typo'd path would "succeed".
-        bool any = false;
-        for (const std::string& line : split_lines(patch)) {
-            std::string t = ltrim(line);
-            if (starts_with(t, "diff --git ") || starts_with(t, "diff --cc ") ||
-                starts_with(t, "diff --combined ")) {
-                any = true;
-                break;
-            }
-        }
-        if (!any)
+        // The same block shapes the parser recognizes count here
+        // (git-style headers and plain unified ---/+++ blocks alike), so
+        // the gate cannot pass something parse_patch would no-op.
+        if (!vcs_patch_has_diff_blocks(patch))
             die("patch file '" + patch_file + "' contains no diff blocks");
     }
     // The patch's wid need not match the target directory's basename
@@ -4236,16 +4234,10 @@ int cmd_apply(const std::string& projeny_arg, const std::string& patch_file)
     if (!normalize_patch_text(patch).empty()) {
         // Refuse garbage input early: a non-empty patch file must hold at
         // least one diff block, otherwise a typo'd path would "succeed".
-        bool any = false;
-        for (const std::string& line : split_lines(patch)) {
-            std::string t = ltrim(line);
-            if (starts_with(t, "diff --git ") || starts_with(t, "diff --cc ") ||
-                starts_with(t, "diff --combined ")) {
-                any = true;
-                break;
-            }
-        }
-        if (!any)
+        // The same block shapes the parser recognizes count here
+        // (git-style headers and plain unified ---/+++ blocks alike), so
+        // the gate cannot pass something parse_patch would no-op.
+        if (!vcs_patch_has_diff_blocks(patch))
             die("patch file '" + patch_file + "' contains no diff blocks");
     } else {
         // An empty (or whitespace-only) patch file changes nothing: report
@@ -4267,7 +4259,7 @@ int cmd_apply(const std::string& projeny_arg, const std::string& patch_file)
     // conflicted.
     {
         std::vector<std::string> hit;
-        for (auto& rel : patch_touched_paths(patch, use_wid)) {
+        for (auto& rel : patch_touched_paths(patch, use_wid, workdir)) {
             if (std::find(st.conflicts.begin(), st.conflicts.end(), rel) !=
                 st.conflicts.end())
                 hit.push_back(rel);
@@ -4285,10 +4277,14 @@ int cmd_apply(const std::string& projeny_arg, const std::string& patch_file)
     // rename pairs mirror what the applier moves; the pure adds are the
     // add-paths list minus rename destinations; the deletes exclude
     // renames.
+    // The tree is threaded so prefix-free plain-diff labels resolve with
+    // the GNU patch -p1 fallback: the status file must record the paths
+    // the applier actually touches (e.g. `sub/new.txt`, not
+    // `oldtree/sub/new.txt`).
     std::vector<std::pair<std::string, std::string>> rens =
-        vcs_rename_pairs(patch, use_wid);
+        vcs_rename_pairs(patch, use_wid, workdir);
     std::vector<std::string> adds;
-    for (auto& a : vcs_add_paths(patch, use_wid)) {
+    for (auto& a : vcs_add_paths(patch, use_wid, workdir)) {
         bool rename_dst = false;
         for (auto& r : rens) {
             if (r.second == a) {
@@ -4299,7 +4295,7 @@ int cmd_apply(const std::string& projeny_arg, const std::string& patch_file)
         if (!rename_dst)
             adds.push_back(a);
     }
-    std::vector<std::string> dels = vcs_deleted_paths(patch, use_wid);
+    std::vector<std::string> dels = vcs_deleted_paths(patch, use_wid, workdir);
 
     std::vector<std::string> conflicts;
     // kAllowAlready: the checkout may genuinely already hold (part of) the
@@ -6303,9 +6299,11 @@ int cmd_freeze_mtime(const std::string& projeny_arg,
         del.push_back(r);
     for (const auto& rn : t.st.renamed)
         del.push_back(rn.first);
-    for (const auto& p : vcs_deleted_paths(t.cur.patch, t.cur.name))
+    // The committed patch is projeny-generated (a/-prefixed), so no
+    // target tree is needed to resolve its labels.
+    for (const auto& p : vcs_deleted_paths(t.cur.patch, t.cur.name, ""))
         del.push_back(p);
-    std::vector<std::string> adds = vcs_add_paths(t.cur.patch, t.cur.name);
+    std::vector<std::string> adds = vcs_add_paths(t.cur.patch, t.cur.name, "");
     std::vector<std::string> pending_adds = t.st.added;
     for (const auto& rn : t.st.renamed)
         pending_adds.push_back(rn.second);
@@ -7083,8 +7081,24 @@ int cmd_help_topic(const std::string& arg0, const std::string& topic)
                "\n"
                "Apply a unified-diff patch file to a directory with -p1\n"
                "semantics and fuzz (git-style diffs: a/b prefixes,\n"
-               "/dev/null sides, new/deleted/mode/rename lines). The\n"
-               "patch's workdir label (if any) is detected automatically,\n"
+               "/dev/null sides, new/deleted/mode/rename lines). Plain\n"
+               "unified diffs are recognized too: --- label / +++ label\n"
+               "blocks with @@ hunks and no diff --git header, optionally\n"
+               "preceded by prose (a cover note, mail headers, a\n"
+               "diffstat), which is ignored. Prefix-free plain labels (the\n"
+               "`diff -u old/f new/f` and recursive `diff -ruN oldtree\n"
+               "newtree` shapes) resolve like `patch -p1` with the tree as\n"
+               "the guide: the whole label path when it exists in <dir>,\n"
+               "else one component stripped. GNU diff -N marks the\n"
+               "nonexistent side of an add/delete block with the epoch\n"
+               "timestamp 1970-01-01 00:00:00 +0000; such a side reads as\n"
+               "/dev/null, so those blocks apply as creations/removals\n"
+               "(a file the patch empties under an epoch-marked +++ side\n"
+               "is removed, like GNU patch). A plain block whose two\n"
+               "sides name different paths applies to the old-side name,\n"
+               "like GNU patch: plain diffs never rename — only explicit\n"
+               "rename from/to headers do. The patch's workdir label (if\n"
+               "any) is detected automatically,\n"
                "so patches from `projeny diff` apply under any directory\n"
                "name. Blocks that already applied are skipped, so\n"
                "re-applying is safe.\n"
@@ -7105,11 +7119,27 @@ int cmd_help_topic(const std::string& arg0, const std::string& topic)
                "\n"
                "Apply a patch file inside a projeny checkout, on top of the\n"
                "uncommitted changes it already has. The patch may be any\n"
-               "git diff or any projeny diff (including `projeny diff`\n"
-               "output): text hunks apply with fuzz, and adds, deletes,\n"
-               "renames, and mode changes (exec bit, symlinks) are applied\n"
-               "to the files. The patch's workdir label (if any) is\n"
-               "detected automatically.\n"
+               "git diff, any projeny diff (including `projeny diff`\n"
+               "output), or any plain unified diff (--- / +++ / @@ blocks\n"
+               "without a diff --git header, optionally preceded by prose\n"
+               "such as a cover note; the prose is ignored). Paths are\n"
+               "interpreted like `patch -p1` run inside the checkout: one\n"
+               "a/ or b/ component is stripped and the rest is relative to\n"
+               "the checkout root; prefix-free plain labels (the `diff -u`\n"
+               "and recursive `diff -ruN` shapes) fall back to a\n"
+               "one-component strip guided by the checkout — the whole\n"
+               "label path when it exists there, else one component\n"
+               "stripped. GNU diff -N's epoch timestamps (1970-01-01\n"
+               "00:00:00 +0000) mark the nonexistent side of an\n"
+               "add/delete block: those blocks apply as creations and\n"
+               "removals, like GNU patch. A plain block whose two sides\n"
+               "name different paths applies to the old-side name, like\n"
+               "GNU patch: plain diffs never rename — only explicit\n"
+               "rename from/to headers do. Text hunks apply with fuzz, and\n"
+               "adds,\n"
+               "deletes, renames, and mode changes (exec bit, symlinks)\n"
+               "are applied to the files. The patch's workdir label (if\n"
+               "any) is detected automatically.\n"
                "\n"
                "Unlike `patch`, this command also books the patch into the\n"
                "status file, so a later `commit` folds it into the\n"

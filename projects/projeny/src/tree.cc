@@ -551,9 +551,10 @@ bool apply_patch_with_conflicts(const std::string& treedir,
 }
 
 std::vector<std::string> patch_touched_paths(const std::string& patch,
-                                             const std::string& wid)
+                                             const std::string& wid,
+                                             const std::string& treedir)
 {
-    return vcs_touched_paths(patch, wid);
+    return vcs_touched_paths(patch, wid, treedir);
 }
 bool merge_one_file(const std::string& base_file, const std::string& ours_file,
                     const std::string& theirs_file, const std::string& dst_path,

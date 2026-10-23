@@ -260,7 +260,30 @@ Paths into the work tree may be CWD-relative, absolute, or workdir-relative
   basename, so the output feeds `projeny patch`, `git apply`, and
   `patch -p1`). Both arguments must be directories.
 - `patch <dir> <patch-file>`: applies a patch file to a directory with
-  fuzz; already-applied blocks are skipped (already-applied means the
+  fuzz; plain unified diffs (no `diff --git` header) are accepted
+  alongside git-style diffs, with or without a prose preamble (cover
+  notes, diffstats, mail signatures around the blocks are ignored), and
+  label paths are interpreted like `patch -p1` inside the tree (one `a/`
+  or `b/` component stripped, remainder relative to the tree root — a
+  leftover workdir-name component is stripped too). Prefix-free plain
+  labels — the `--- old/f` / `+++ new/f` shape `diff -u` and recursive
+  `diff -ruN` emit — resolve with the same -p1 fallback, guided by the
+  tree: the whole label path when it exists in the tree, else one
+  component stripped (so a genuinely tree-relative `--- src/a.c` stays
+  whole); a block the tree cannot decide follows the patch's first
+  decidable block, and when nothing is decidable a label whose first
+  component is absent from the tree is treated as the emitter's own
+  directory and stripped. GNU `diff -N`'s epoch timestamps
+  (`1970-01-01 00:00:00 +0000` after the tab) mark the nonexistent side
+  of an add/delete block: such a side reads as `/dev/null`, so those
+  blocks apply as creations and removals — including removing a file the
+  patch empties — exactly like GNU patch. A plain block whose two sides
+  name different paths applies to the old-side name, like GNU patch
+  (`patching file <old name>`): plain diffs never rename — only explicit
+  `rename from/to` headers do. A `---`/`+++` pair
+  with no `@@` hunk and no `/dev/null` side is prose, not a block, and a
+  hunk-less `/dev/null` pair creates or deletes an empty file.
+  Already-applied blocks are skipped (already-applied means the
   file already holds the hunk's exact post-image with every deleted run
   anchored — leading deleted runs, and slid matches of mid-hunk deleted
   runs, also require the file line above the post-image span not to be
@@ -275,6 +298,25 @@ Paths into the work tree may be CWD-relative, absolute, or workdir-relative
   projeny checkout, on top of the uncommitted changes it already has.
   The patch may be any git diff or any projeny diff (including `projeny
   diff` output; the workdir label, if any, is detected automatically).
+  Plain unified diffs (no `diff --git` header) are accepted too, with or
+  without a prose preamble (ignored); paths are interpreted like `patch
+  -p1` inside the checkout (one `a/` or `b/` component stripped,
+  remainder relative to the tree root — a leftover workdir-name component
+  is stripped too; prefix-free plain labels, the `diff -u`/`diff -ruN`
+  shape, fall back to a one-component strip guided by the checkout: the
+  whole label path when it exists there, else one component stripped, so
+  `diff -ruN oldtree newtree` output applies like `patch -p1`). GNU
+  `diff -N`'s epoch timestamps mark the nonexistent side of an
+  add/delete block, which then applies as a creation or a removal (a
+  file emptied by an epoch-marked block is removed, like GNU patch; one
+  emptied by an ordinary real-timestamp block stays on disk empty). A
+  plain block whose two sides name different paths applies to the
+  old-side name, like GNU patch: plain diffs never rename — only
+  explicit `rename from/to` headers do. A
+  `---`/`+++` pair with no `@@` hunk and no
+  `/dev/null` side is prose, not a block, and a hunk-less `/dev/null`
+  pair creates or deletes an empty file (booked added/removed so `commit`
+  folds it in).
   Unlike `patch`, the command also books the patch into the status file
   so a later `commit` folds it into the `.projeny` patch: files the patch
   adds are marked added, files it deletes are marked removed, renames are
