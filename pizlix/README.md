@@ -74,6 +74,8 @@ You can also run a GNOME Wayland session. Log in as a non-root user and do:
 
 This starts mutter as the Wayland compositor with gnome-session managing it (a weston-terminal will be autostarted; launch GNOME apps from there, e.g. `gnome-text-editor`).
 
+With Post-LC 8 built, `pizlix-gnome` starts the full GNOME Shell (top bar, overview, app grid) instead of the bare mutter session.
+
 <a name="stages"></a>
 ## Build Stages
 
@@ -128,6 +130,10 @@ This builds the GNOME desktop on top of the Wayland environment: dbus, elogind, 
 If you want to just do this stage of the build and nothing more, do `sudo ./build_postlc7.sh`.
 
 If you want to start the build here, do `sudo ./build_with_recovered_postlc6.sh`.
+
+### Post-LC 8
+
+This builds GNOME Shell: the SpiderMonkey JavaScript engine (mozjs), gjs (the JS-to-GNOME bindings), and gnome-shell (the full GNOME desktop shell: top bar, activities overview, app grid, notifications). This is the full GNOME desktop experience. If you want to just do this stage of the build and nothing more, do `sudo ./build_postlc8.sh`. If you want to start the build here, do `sudo ./build_with_recovered_postlc7.sh`.
 
 ### Other Tricks
 
