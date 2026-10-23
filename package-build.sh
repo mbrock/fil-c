@@ -66,7 +66,7 @@ then
     exit 1
 fi
 
-build_name=$build_name_base-0.686-$OS-$ARCH
+build_name=$build_name_base-0.687-$OS-$ARCH
 
 rm -rf $build_name
 

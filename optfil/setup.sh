@@ -26,7 +26,7 @@
 
 set -e
 
-VERSION="0.686"
+VERSION="0.687"
 
 # This gets replaced with a literal when we copy the script into the install package.
 ARCH=$(uname -m)
