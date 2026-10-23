@@ -42,6 +42,11 @@ PZ=$(cd $PWD/../../.. && echo $PWD/pizfix)
 #   which Fil-C cannot run.
 # ac_cv_have_decl_UFFDIO_WRITEPROTECT_MODE_WP=no: phpdbg watchpoints would
 #   use userfaultfd, which Fil-C does not support; phpdbg dies at startup.
+# php_cv_have_fpu_inline_asm_x86=no: the x87 fnstcw/fldcw probe is a link-only
+#   test, and Fil-C compiles inline asm into a runtime panic instead of
+#   rejecting it, so the probe would falsely succeed and make zend_float.h
+#   emit x87 asm on non-x86 hosts (e.g. aarch64), panicking every request
+#   startup. Fil-C cannot execute inline asm on any target.
 # --define-prefix: most pizfix .pc files record a prefix through an
 #   extracted-source directory that their build script has since deleted.
 # build_sqlite.sh installs a static libsqlite3 without a pkg-config file.
@@ -59,7 +64,8 @@ PATH=$PZ/bin:$PATH PKG_CONFIG="$PZ/bin/pkg-config --define-prefix" PKG_CONFIG_PA
     --enable-gd --with-jpeg --with-webp \
     --enable-bcmath --enable-calendar --enable-exif \
     --enable-pcntl --enable-sockets \
-    ac_cv_have_decl_UFFDIO_WRITEPROTECT_MODE_WP=no
+    ac_cv_have_decl_UFFDIO_WRITEPROTECT_MODE_WP=no \
+    php_cv_have_fpu_inline_asm_x86=no
 make -j $NCPU
 make -j $NCPU install
 

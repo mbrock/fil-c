@@ -143,6 +143,18 @@ diff --git a/php/Zend/zend_fibers.c b/php/Zend/zend_fibers.c
  #endif
 
  		fiber->fci.retval = &fiber->result;
+diff --git a/php/Zend/zend_float.h b/php/Zend/zend_float.h
+--- a/php/Zend/zend_float.h
++++ b/php/Zend/zend_float.h
+@@ -314,7 +314,7 @@
+                 return _xpfpa_result; \
+             } while (0)
+
+-#elif defined(HAVE_FPU_INLINE_ASM_X86) && !defined(__x86_64__)
++#elif defined(HAVE_FPU_INLINE_ASM_X86) && defined(__i386__)
+
+ /*
+   Custom x86 inline assembler implementation.
 diff --git a/php/Zend/zend_multiply.h b/php/Zend/zend_multiply.h
 --- a/php/Zend/zend_multiply.h
 +++ b/php/Zend/zend_multiply.h
