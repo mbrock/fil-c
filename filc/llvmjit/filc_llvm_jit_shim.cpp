@@ -462,6 +462,12 @@ public:
 // to the region, and only descendants of the process that mapped it, which
 // share this loaded shim and its command-line options, can see it.
 //
+// Caveat: a write through /proc/<pid>/mem needs no capability. The runtime
+// refuses writable opens of it, but that check can be raced by a second
+// thread, and code that wins it can plant entries every process sharing the
+// region will link. Without the cache such an escape would stay within one
+// process; programs should weigh that before turning the cache on.
+//
 // Entries are published lock-free: the arena cursor only grows, an entry is
 // written in full before a release CAS puts its offset in a slot, and readers
 // acquire the slot. A process killed mid-insert only leaks arena space. A full
@@ -581,7 +587,8 @@ CacheKey objectCacheKey(ShimJIT* Session, TargetMachine& TM, Module& M) {
     return K.final();
 }
 
-bool objectCacheLookup(char* Base, const CacheKey& Key, SmallVector<char, 0>& Obj) {
+// With Obj null, only says whether the key is present.
+bool objectCacheLookup(char* Base, const CacheKey& Key, SmallVector<char, 0>* Obj) {
     auto* H = reinterpret_cast<ObjectCacheHeader*>(Base);
     auto* Slots = objectCacheSlots(Base);
     uint64_t I;
@@ -598,7 +605,8 @@ bool objectCacheLookup(char* Base, const CacheKey& Key, SmallVector<char, 0>& Ob
         ASSERT(Size <= H->Capacity - Off - sizeof(ObjectCacheEntry));
         // Copy it out: linking must not parse memory another process can write.
         const char* Data = reinterpret_cast<const char*>(E + 1);
-        Obj.assign(Data, Data + Size);
+        if (Obj)
+            Obj->assign(Data, Data + Size);
         return true;
     }
     return false;
@@ -616,8 +624,7 @@ void objectCacheInsert(char* Base, const CacheKey& Key, const SmallVector<char, 
         return;
     // Another process may have inserted it since our lookup; don't spend
     // arena space on a duplicate.
-    SmallVector<char, 0> Existing;
-    if (objectCacheLookup(Base, Key, Existing))
+    if (objectCacheLookup(Base, Key, nullptr))
         return;
     uint64_t Off = H->ArenaEnd.fetch_add(Len, std::memory_order_relaxed);
     if (Off > H->Capacity - Len)
@@ -633,6 +640,7 @@ void objectCacheInsert(char* Base, const CacheKey& Key, const SmallVector<char, 
         if (Slots[I & H->SlotMask].compare_exchange_strong(
                 Expected, Off, std::memory_order_release, std::memory_order_acquire))
             return;
+        ASSERT(Expected >= H->ArenaBegin && Expected <= H->Capacity - sizeof(ObjectCacheEntry));
         auto* Other = reinterpret_cast<ObjectCacheEntry*>(Base + Expected);
         if (!memcmp(Other->Key.data(), Key.data(), Key.size()))
             return; // another process got there first
@@ -768,7 +776,7 @@ ShimExportMapping* ShimJITCompile(
             // The bitcode writer trusts the IR it writes, so verify first.
             CHECK(!verifyModule(*M, &errs()));
             Key = objectCacheKey(session, **TM, *M);
-            Cached = objectCacheLookup(Cache, Key, Obj);
+            Cached = objectCacheLookup(Cache, Key, &Obj);
         }
 
         if (Cached)

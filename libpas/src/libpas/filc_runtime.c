@@ -8887,10 +8887,14 @@ unsigned filc_native_zsys_getegid(filc_thread* my_thread)
 }
 
 /* Writing /proc/<pid>/mem pokes the address space without capabilities, so
-   it would let Fil-C code escape (and corrupt memory shared with other
-   processes, such as the LLVM JIT's shared object cache). Paths can reach it
-   through symlinks, dirfds and /proc/self/fd, so check the opened file rather
-   than the path: refuse writable procfs files whose name is "mem". */
+   it lets Fil-C code escape (and corrupt memory shared with other processes,
+   such as the LLVM JIT's shared object cache). Paths can reach it through
+   symlinks, dirfds and /proc/self/fd, so check the opened file rather than
+   the path: refuse writable procfs files whose name is "mem".
+
+   This is hardening, not a closed hole: the fd is in the shared fd table
+   until the check closes it, so another thread can dup or pwrite it first,
+   and code that can change the mount table can disguise the file. */
 static int deny_proc_mem_write(filc_thread* my_thread, int fd, uint64_t flags)
 {
     if (fd < 0 || (flags & O_ACCMODE) == O_RDONLY || (flags & O_PATH))
@@ -8900,10 +8904,10 @@ static int deny_proc_mem_write(filc_thread* my_thread, int fd, uint64_t flags)
     struct statfs fs;
     if (fstatfs(fd, &fs) || fs.f_type == 0x9fa0 /* PROC_SUPER_MAGIC */) {
         char link[64];
-        char target[256];
+        char target[PATH_MAX];
         snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
         ssize_t len = readlink(link, target, sizeof(target) - 1);
-        if (len < 0)
+        if (len < 0 || len == sizeof(target) - 1)
             deny = true;
         else {
             target[len] = 0;

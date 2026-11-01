@@ -901,8 +901,13 @@ void *FilLLVMJIT_GetPointerToGlobal(FilLLVMJITModuleRef mod, const char *name);
 
    Call it before forking: once the region is mapped, later calls do nothing,
    and a process that makes the first call after forking gets a region that
-   only its own later children share. Writable opens of /proc/<pid>/mem are
-   refused, so Fil-C code cannot reach the region. Returns 0 when the cache is
+   only its own later children share.
+
+   Fil-C code gets no capability to the region, but a write through
+   /proc/<pid>/mem needs none. The runtime refuses writable opens of it, yet
+   a second thread can race that check, and code that wins could plant an
+   entry that every process sharing the region links, where without the
+   cache the damage would stay in one process. Returns 0 when the cache is
    on, nonzero when it could not be mapped or when LLVM command-line options
    (FILC_LLVM_OPTIONS) are in effect, which the cache does not account for. */
 #define FILC_LLVM_JIT_SHARED_OBJECT_CACHE 1
