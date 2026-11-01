@@ -599,6 +599,8 @@ addSig "PAS_GLIBC", "void", "FilLLVMJIT_SetGlobalMapping", "filc_ptr", "filc_ptr
 addSig "PAS_GLIBC", "void", "FilLLVMJIT_BlessPointer", "filc_ptr", "filc_ptr"
 addSig "PAS_GLIBC", "filc_ptr", "FilLLVMJIT_CompileModule", "filc_ptr", "filc_ptr"
 addSig "PAS_GLIBC", "filc_ptr", "FilLLVMJIT_GetPointerToGlobal", "filc_ptr", "filc_ptr"
+addSig "PAS_GLIBC", "int", "FilLLVMJIT_EnableSharedObjectCache", "size_t"
+addSig "PAS_GLIBC", "unsigned long long", "FilLLVMJIT_SharedObjectCacheHits"
 addSig "PAS_GLIBC", "filc_ptr", "LLVMContextCreate"
 addSig "PAS_GLIBC", "void", "LLVMGetVersion", "filc_ptr", "filc_ptr", "filc_ptr"
 addSig "PAS_GLIBC", "double", "LLVMConstRealGetDouble", "filc_ptr", "filc_ptr"

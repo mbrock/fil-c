@@ -890,6 +890,27 @@ FilLLVMJITModuleRef FilLLVMJIT_CompileModule(FilLLVMJITRef jit,
 /* Address lookup. */
 void *FilLLVMJIT_GetPointerToGlobal(FilLLVMJITModuleRef mod, const char *name);
 
+/* Share compiled code with processes forked from this one.
+
+   The first call maps a region of the given size that this process and the
+   processes it forks afterwards share, as PHP-FPM's workers share their
+   master's memory. From then on CompileModule first looks for the object
+   code that an identical compile (the same module, options and mappings,
+   including every mapped pointer and its capability) produced in any of
+   these processes, and on a hit links that instead of optimizing and
+   generating code again. Only the runtime reads and writes the region; a hit
+   gives a module exactly the code its own compile would have. When the
+   region is full, compiles go on without it.
+
+   Call it before forking. Later calls do nothing. Returns 0 when the cache is
+   on, nonzero when it could not be mapped or when LLVM command-line options
+   (FILC_LLVM_OPTIONS) are in effect, which the cache does not account for. */
+#define FILC_LLVM_JIT_SHARED_OBJECT_CACHE 1
+int FilLLVMJIT_EnableSharedObjectCache(__SIZE_TYPE__ bytes);
+
+/* How many CompileModule calls in this process the shared cache served. */
+unsigned long long FilLLVMJIT_SharedObjectCacheHits(void);
+
 #if 0
 { /* tell emacs what is up */
 #endif

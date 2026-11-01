@@ -456,6 +456,20 @@ filc_ptr filc_native_FilLLVMJIT_GetPointerToGlobal(filc_thread* my_thread, filc_
     return result;
 }
 
+int filc_native_FilLLVMJIT_EnableSharedObjectCache(filc_thread* my_thread, size_t bytes)
+{
+    /* Loading the shim here pins it (and its command-line options) for this process and every
+       process it forks afterwards, which inherit both the shim and the region. */
+    ensure_api(my_thread);
+    return api->ShimJITEnableSharedObjectCache(bytes);
+}
+
+unsigned long long filc_native_FilLLVMJIT_SharedObjectCacheHits(filc_thread* my_thread)
+{
+    ensure_api(my_thread);
+    return api->ShimJITSharedObjectCacheHits();
+}
+
 filc_ptr filc_native_FilLLVMJIT_CompileModule(filc_thread* my_thread, filc_ptr jit_ptr,
                                               filc_ptr module_ptr)
 {

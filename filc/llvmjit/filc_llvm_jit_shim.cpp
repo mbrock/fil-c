@@ -39,6 +39,9 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Alignment.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Config/llvm-config.h"
+#include "llvm/Support/BLAKE3.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/GlobalsModRef.h"
@@ -443,6 +446,187 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+// Shared object cache.
+//
+// FilLLVMJIT_EnableSharedObjectCache maps an anonymous shared region that
+// processes forked afterwards inherit (PHP-FPM's workers, for instance), so
+// one process's compile serves the others. An entry maps a key to the ELF
+// object that the pipeline below produced; a hit skips optimization and
+// codegen but links the object as usual, with this process's allocations and
+// runtime symbols.
+//
+// Soundness: the key covers every input the object depends on (the verified
+// input module, the options, every GlobalMapping and PointerMapping value,
+// the target), so a hit hands a session exactly the capabilities it supplied
+// itself. Only this shim writes entries: Fil-C code never gets a capability
+// to the region, and only descendants of the process that mapped it, which
+// share this loaded shim and its command-line options, can see it.
+//
+// Entries are published lock-free: the arena cursor only grows, an entry is
+// written in full before a release CAS puts its offset in a slot, and readers
+// acquire the slot. A process killed mid-insert only leaks arena space. A full
+// arena or table just stops caching.
+// ---------------------------------------------------------------------------
+using CacheKey = BLAKE3Result<32>;
+
+struct ObjectCacheHeader {
+    uint64_t Capacity;      // bytes in the region
+    uint64_t SlotMask;      // slot count - 1, a power of two minus one
+    uint64_t ArenaBegin;    // offset of the first entry
+    std::atomic<uint64_t> ArenaEnd; // offset of the next free byte; may pass Capacity
+};
+
+struct ObjectCacheEntry {
+    CacheKey Key;
+    uint64_t Size;          // object bytes, which follow
+};
+
+static_assert(std::atomic<uint64_t>::is_always_lock_free,
+              "the cache's atomics must work across processes");
+
+std::atomic<char*> SharedObjectCache;
+std::mutex SharedObjectCacheMutex;
+std::atomic<uint64_t> ObjectCacheHits;
+bool HaveCommandLineOptions;
+
+std::atomic<uint64_t>* objectCacheSlots(char* Base) {
+    return reinterpret_cast<std::atomic<uint64_t>*>(Base + sizeof(ObjectCacheHeader));
+}
+
+int enableObjectCache(size_t Bytes) {
+    std::lock_guard<std::mutex> Lock(SharedObjectCacheMutex);
+    if (SharedObjectCache.load(std::memory_order_relaxed))
+        return 0;
+    // Options change what the passes do, and the key does not cover them.
+    if (HaveCommandLineOptions)
+        return 1;
+    uint64_t Slots = 1024;
+    while (Slots < (1u << 22) && Slots * 4096 < Bytes)
+        Slots *= 2;
+    uint64_t ArenaBegin = alignTo(sizeof(ObjectCacheHeader) + Slots * sizeof(uint64_t), 64);
+    if (Bytes < ArenaBegin + (1 << 20))
+        return 1;
+    void* Base = mmap(nullptr, Bytes, PROT_READ | PROT_WRITE,
+                      MAP_SHARED | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (Base == MAP_FAILED)
+        return 1;
+    auto* H = new (Base) ObjectCacheHeader;
+    H->Capacity = Bytes;
+    H->SlotMask = Slots - 1;
+    H->ArenaBegin = ArenaBegin;
+    H->ArenaEnd.store(ArenaBegin, std::memory_order_relaxed);
+    SharedObjectCache.store(static_cast<char*>(Base), std::memory_order_release);
+    return 0;
+}
+
+class CacheKeyHasher {
+    BLAKE3 H;
+
+    void raw(const void* P, size_t N) {
+        H.update(ArrayRef<uint8_t>(static_cast<const uint8_t*>(P), N));
+    }
+
+public:
+    // Every field is tagged and length-prefixed, so distinct inputs never
+    // concatenate to the same bytes.
+    void field(StringRef Tag, StringRef Data) {
+        uint64_t N = Tag.size();
+        raw(&N, sizeof(N));
+        raw(Tag.data(), Tag.size());
+        N = Data.size();
+        raw(&N, sizeof(N));
+        raw(Data.data(), Data.size());
+    }
+    void field(StringRef Tag, uint64_t V) {
+        field(Tag, StringRef(reinterpret_cast<const char*>(&V), sizeof(V)));
+    }
+    CacheKey final() { return H.final(); }
+};
+
+CacheKey objectCacheKey(ShimJIT* Session, TargetMachine& TM, Module& M) {
+    CacheKeyHasher K;
+    K.field("cache", "filc-llvm-jit-object-cache-v1");
+    K.field("llvm", LLVM_VERSION_STRING);
+    K.field("shim-api", SHIM_API_VERSION);
+    K.field("triple", TM.getTargetTriple().str());
+    K.field("cpu", TM.getTargetCPU());
+    K.field("features", TM.getTargetFeatureString());
+    std::map<std::string, std::string> Options(Session->options.begin(), Session->options.end());
+    for (auto& KV : Options) {
+        K.field("option", KV.first);
+        K.field("value", KV.second);
+    }
+    std::map<std::string, FilPtrLiteral> Globals(Session->filConfig.GlobalMapping.begin(),
+                                                Session->filConfig.GlobalMapping.end());
+    for (auto& KV : Globals) {
+        K.field("global", KV.first);
+        K.field("ptr", reinterpret_cast<uintptr_t>(KV.second.ptr));
+        K.field("lower", reinterpret_cast<uintptr_t>(KV.second.lower));
+    }
+    std::map<uintptr_t, uintptr_t> Pointers;
+    for (auto& KV : Session->filConfig.PointerMapping)
+        Pointers[reinterpret_cast<uintptr_t>(KV.first)] = reinterpret_cast<uintptr_t>(KV.second);
+    for (auto& KV : Pointers) {
+        K.field("pointer", KV.first);
+        K.field("lower", KV.second);
+    }
+    SmallVector<char, 0> Bitcode;
+    raw_svector_ostream OS(Bitcode);
+    WriteBitcodeToFile(M, OS);
+    K.field("module", StringRef(Bitcode.data(), Bitcode.size()));
+    return K.final();
+}
+
+bool objectCacheLookup(char* Base, const CacheKey& Key, SmallVector<char, 0>& Obj) {
+    auto* H = reinterpret_cast<ObjectCacheHeader*>(Base);
+    auto* Slots = objectCacheSlots(Base);
+    uint64_t I;
+    memcpy(&I, Key.data(), sizeof(I));
+    for (uint64_t N = 0; N <= H->SlotMask; N++, I++) {
+        uint64_t Off = Slots[I & H->SlotMask].load(std::memory_order_acquire);
+        if (!Off)
+            return false;
+        ASSERT(Off >= H->ArenaBegin && Off <= H->Capacity - sizeof(ObjectCacheEntry));
+        auto* E = reinterpret_cast<ObjectCacheEntry*>(Base + Off);
+        if (memcmp(E->Key.data(), Key.data(), Key.size()))
+            continue;
+        uint64_t Size = E->Size;
+        ASSERT(Size <= H->Capacity - Off - sizeof(ObjectCacheEntry));
+        // Copy it out: linking must not parse memory another process can write.
+        const char* Data = reinterpret_cast<const char*>(E + 1);
+        Obj.assign(Data, Data + Size);
+        return true;
+    }
+    return false;
+}
+
+void objectCacheInsert(char* Base, const CacheKey& Key, const SmallVector<char, 0>& Obj) {
+    auto* H = reinterpret_cast<ObjectCacheHeader*>(Base);
+    auto* Slots = objectCacheSlots(Base);
+    uint64_t Len = alignTo(sizeof(ObjectCacheEntry) + Obj.size(), 16);
+    if (H->ArenaEnd.load(std::memory_order_relaxed) > H->Capacity - Len)
+        return;
+    uint64_t Off = H->ArenaEnd.fetch_add(Len, std::memory_order_relaxed);
+    if (Off > H->Capacity - Len)
+        return;
+    auto* E = reinterpret_cast<ObjectCacheEntry*>(Base + Off);
+    E->Key = Key;
+    E->Size = Obj.size();
+    memcpy(E + 1, Obj.data(), Obj.size());
+    uint64_t I;
+    memcpy(&I, Key.data(), sizeof(I));
+    for (uint64_t N = 0; N <= H->SlotMask; N++, I++) {
+        uint64_t Expected = 0;
+        if (Slots[I & H->SlotMask].compare_exchange_strong(
+                Expected, Off, std::memory_order_release, std::memory_order_acquire))
+            return;
+        auto* Other = reinterpret_cast<ObjectCacheEntry*>(Base + Expected);
+        if (!memcmp(Other->Key.data(), Key.data(), Key.size()))
+            return; // another process got there first
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline.
 // ---------------------------------------------------------------------------
 void optimize(Module &M, TargetMachine &TM, OptimizationLevel Level, FilJITConfiguration& filConfig) {
@@ -548,6 +732,9 @@ ShimExportMapping* ShimJITCompile(
 
     // Clone, optimize, codegen. The caller's module is never touched.
     SmallVector<char, 0> Obj;
+    char* Cache = SharedObjectCache.load(std::memory_order_acquire);
+    CacheKey Key;
+    bool Cached = false;
     {
         std::unique_ptr<Module> M = CloneModule(*unwrap(CMod));
         M->setTargetTriple((*TM)->getTargetTriple().str());
@@ -564,13 +751,26 @@ ShimExportMapping* ShimJITCompile(
                                       "i16:16:32-i64:64-i128:128-n32:64-S128-Fn32");
         }
 
-        optimize(*M, **TM, OL, session->filConfig);
+        if (Cache) {
+            // The bitcode writer trusts the IR it writes, so verify first.
+            CHECK(!verifyModule(*M, &errs()));
+            Key = objectCacheKey(session, **TM, *M);
+            Cached = objectCacheLookup(Cache, Key, Obj);
+        }
 
-        raw_svector_ostream OS(Obj);
-        legacy::PassManager CG;
-        ASSERT(!(*TM)->addPassesToEmitFile(CG, OS, nullptr,
-                                           CodeGenFileType::ObjectFile));
-        CG.run(*M);
+        if (Cached)
+            ObjectCacheHits.fetch_add(1, std::memory_order_relaxed);
+        else {
+            optimize(*M, **TM, OL, session->filConfig);
+
+            raw_svector_ostream OS(Obj);
+            legacy::PassManager CG;
+            ASSERT(!(*TM)->addPassesToEmitFile(CG, OS, nullptr,
+                                               CodeGenFileType::ObjectFile));
+            CG.run(*M);
+            if (Cache)
+                objectCacheInsert(Cache, Key, Obj);
+        }
     } // clone destroyed; nothing below touches the LLVMContext
 
     // Link. Fully synchronous: returns only after finalize or failure.
@@ -595,6 +795,14 @@ ShimExportMapping* ShimJITCompile(
     mapping->mapping = std::move(Out.Exports);
 
     return mapping;
+}
+
+int ShimJITEnableSharedObjectCache(size_t bytes) {
+    return enableObjectCache(bytes);
+}
+
+unsigned long long ShimJITSharedObjectCacheHits(void) {
+    return ObjectCacheHits.load(std::memory_order_relaxed);
 }
 
 void ShimJITDestroy(ShimJIT* jit) {
@@ -626,6 +834,7 @@ const struct shim_api *FilLLVMJIT_GetApi(const shim_runtime_api* runtime_api,
                                          const char* options)
 {
     if (options) {
+        HaveCommandLineOptions = true;
         BumpPtrAllocator Alloc;
         StringSaver Saver(Alloc);
         SmallVector<const char *, 16> Argv{"llvm"};  // argv[0]; the parser skips it

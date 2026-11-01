@@ -75,6 +75,8 @@ JIT_OWN = [
     ("void", "ShimJITSetPointerMapping", "(ShimJIT* jit, shim_ptr ptr)"),
     ("ShimExportMapping*", "ShimJITCompile", "(void*, void* executable_module, ShimJIT* jit, LLVMModuleRef mod)"),
     ("void", "ShimJITDestroy", "(ShimJIT* jit)"),
+    ("int", "ShimJITEnableSharedObjectCache", "(size_t bytes)"),
+    ("unsigned long long", "ShimJITSharedObjectCacheHits", "(void)"),
     ("void*", "ShimExportMappingLookup", "(ShimExportMapping* mapping, const char* name)"),
     ("void", "ShimExportMappingDestroy", "(ShimExportMapping* mapping)")
 ]
@@ -429,7 +431,7 @@ API_STRUCT_TEMPLATE = """
 #define FILC_LLVM_JIT_GC_SECTION_PREFIX "filc_gc_obj"
 #define FILC_LLVM_JIT_AUX_SECTION_PREFIX "filc_jit_aux"
 
-#define SHIM_API_VERSION 7
+#define SHIM_API_VERSION 8
 
 typedef struct shim_ptr shim_ptr;
 struct shim_ptr {
