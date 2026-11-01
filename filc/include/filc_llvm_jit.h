@@ -876,14 +876,11 @@ void FilLLVMJIT_BlessPointer(FilLLVMJITRef jit, void* ptr);
    it in a dedicated context that nothing else shares, and that context
    moves to the JIT along with the module.  Extern declarations matching
    AddGlobalMapping entries are bound to their mapped addresses during
-   compilation: the blessed lazy-resolution declarations
-   (filc_llvm_jit_resolve, filc_llvm_jit_resolve_raw_pointer) keep the raw
-   ABI and route through module-private wrappers carrying that compile's
-   resolve callbacks, while other function names keep their declarations
-   so FilPizlonator authors lazy-extern workers for them, whose bodies are
-   then stubbed to return the mapped address wrapped as a flight {addr,addr}
-   (a raw ptr constant would be a type mismatch against the flight-pointer
-   ABI the call sites lower to). */
+   compilation: function names keep their declarations so FilPizlonator
+   authors lazy-extern workers for them, whose bodies are then stubbed to
+   return the mapped address wrapped as a flight {addr,addr} (a raw ptr
+   constant would be a type mismatch against the flight-pointer ABI the
+   call sites lower to). */
 FilLLVMJITModuleRef FilLLVMJIT_CompileModule(FilLLVMJITRef jit,
                                              LLVMModuleRef mod);
 
@@ -902,7 +899,10 @@ void *FilLLVMJIT_GetPointerToGlobal(FilLLVMJITModuleRef mod, const char *name);
    gives a module exactly the code its own compile would have. When the
    region is full, compiles go on without it.
 
-   Call it before forking. Later calls do nothing. Returns 0 when the cache is
+   Call it before forking: once the region is mapped, later calls do nothing,
+   and a process that makes the first call after forking gets a region that
+   only its own later children share. Writable opens of /proc/<pid>/mem are
+   refused, so Fil-C code cannot reach the region. Returns 0 when the cache is
    on, nonzero when it could not be mapped or when LLVM command-line options
    (FILC_LLVM_OPTIONS) are in effect, which the cache does not account for. */
 #define FILC_LLVM_JIT_SHARED_OBJECT_CACHE 1

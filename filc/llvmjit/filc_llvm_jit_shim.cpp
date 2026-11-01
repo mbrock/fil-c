@@ -494,6 +494,10 @@ std::atomic<uint64_t>* objectCacheSlots(char* Base) {
 }
 
 int enableObjectCache(size_t Bytes) {
+    // Check before locking: a child forked while another thread held the
+    // mutex must not deadlock here.
+    if (SharedObjectCache.load(std::memory_order_acquire))
+        return 0;
     std::lock_guard<std::mutex> Lock(SharedObjectCacheMutex);
     if (SharedObjectCache.load(std::memory_order_relaxed))
         return 0;
@@ -604,7 +608,16 @@ void objectCacheInsert(char* Base, const CacheKey& Key, const SmallVector<char, 
     auto* H = reinterpret_cast<ObjectCacheHeader*>(Base);
     auto* Slots = objectCacheSlots(Base);
     uint64_t Len = alignTo(sizeof(ObjectCacheEntry) + Obj.size(), 16);
+    // Rejecting objects bigger than the arena first keeps Capacity - Len
+    // from wrapping below.
+    if (Len > H->Capacity - H->ArenaBegin)
+        return;
     if (H->ArenaEnd.load(std::memory_order_relaxed) > H->Capacity - Len)
+        return;
+    // Another process may have inserted it since our lookup; don't spend
+    // arena space on a duplicate.
+    SmallVector<char, 0> Existing;
+    if (objectCacheLookup(Base, Key, Existing))
         return;
     uint64_t Off = H->ArenaEnd.fetch_add(Len, std::memory_order_relaxed);
     if (Off > H->Capacity - Len)

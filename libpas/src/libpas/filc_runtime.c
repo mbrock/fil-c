@@ -8886,6 +8886,41 @@ unsigned filc_native_zsys_getegid(filc_thread* my_thread)
     return result;
 }
 
+/* Writing /proc/<pid>/mem pokes the address space without capabilities, so
+   it would let Fil-C code escape (and corrupt memory shared with other
+   processes, such as the LLVM JIT's shared object cache). Paths can reach it
+   through symlinks, dirfds and /proc/self/fd, so check the opened file rather
+   than the path: refuse writable procfs files whose name is "mem". */
+static int deny_proc_mem_write(filc_thread* my_thread, int fd, uint64_t flags)
+{
+    if (fd < 0 || (flags & O_ACCMODE) == O_RDONLY || (flags & O_PATH))
+        return fd;
+    filc_exit(my_thread);
+    bool deny = false;
+    struct statfs fs;
+    if (fstatfs(fd, &fs) || fs.f_type == 0x9fa0 /* PROC_SUPER_MAGIC */) {
+        char link[64];
+        char target[256];
+        snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+        ssize_t len = readlink(link, target, sizeof(target) - 1);
+        if (len < 0)
+            deny = true;
+        else {
+            target[len] = 0;
+            char* slash = strrchr(target, '/');
+            deny = !strcmp(slash ? slash + 1 : target, "mem");
+        }
+    }
+    if (deny)
+        close(fd);
+    filc_enter(my_thread);
+    if (deny) {
+        filc_set_errno(EACCES);
+        return -1;
+    }
+    return fd;
+}
+
 int filc_native_zsys_open(filc_thread* my_thread, filc_ptr path_ptr, int flags,
                           filc_cc_cursor* args)
 {
@@ -8901,7 +8936,8 @@ int filc_native_zsys_open(filc_thread* my_thread, filc_ptr path_ptr, int flags,
     char* path = filc_check_and_get_tmp_str(my_thread, path_ptr);
     if (verbose)
         pas_log("doing an open with path = %s, flags = %d, mode = %u.\n", path, flags, mode);
-    int result = FILC_SYSCALL(my_thread, open(path, flags, (mode_t)mode));
+    int result = deny_proc_mem_write(
+        my_thread, FILC_SYSCALL(my_thread, open(path, flags, (mode_t)mode)), flags);
     if (result < 0 && filc_dump_errnos)
         pas_log("[%d] open(2) failed for path = %s\n", pas_getpid(), path);
     return result;
@@ -14051,7 +14087,8 @@ int filc_native_zsys_open_by_handle_at(filc_thread* my_thread, int mount_fd, fil
     filc_internal_panic(NULL, "open_by_handle_at not supported.");
 #else /* PAS_COSMO -> so !PAS_COSMO */
     struct file_handle* handle = check_and_get_file_handle(handle_ptr);
-    return FILC_SYSCALL(my_thread, open_by_handle_at(mount_fd, handle, flags));
+    return deny_proc_mem_write(
+        my_thread, FILC_SYSCALL(my_thread, open_by_handle_at(mount_fd, handle, flags)), flags);
 #endif /* PAS_COSMO -> so end of !PAS_COSMO */
 }
 
@@ -14124,7 +14161,8 @@ int filc_native_zsys_openat(filc_thread* my_thread, int dirfd, filc_ptr path_ptr
     char* path = filc_check_and_get_tmp_str(my_thread, path_ptr);
     if (verbose)
         pas_log("doing an openat with dirfd = %d, path = %s, flags = %d.\n", dirfd, path, flags);
-    return FILC_SYSCALL(my_thread, openat(dirfd, path, flags, mode));
+    return deny_proc_mem_write(my_thread, FILC_SYSCALL(my_thread, openat(dirfd, path, flags, mode)),
+                               flags);
 }
 
 struct known_open_how {
@@ -14167,8 +14205,13 @@ int filc_native_zsys_openat2(filc_thread* my_thread, int dirfd, filc_ptr path_pt
     PAS_UNUSED_PARAM(dirfd);
     filc_internal_panic(NULL, "openat2 not supported.");
 #else /* PAS_COSMO -> so !PAS_COSMO */
-    return FILC_SYSCALL(
-        my_thread, syscall(SYS_openat2, dirfd, path, filc_ptr_ptr(how_ptr), actual_size));
+    /* Copy it so that the flags we check are the flags the kernel saw. */
+    struct known_open_how how = { 0, 0, 0 };
+    memcpy(&how, filc_ptr_ptr(how_ptr), actual_size);
+    return deny_proc_mem_write(
+        my_thread,
+        (int)FILC_SYSCALL(my_thread, syscall(SYS_openat2, dirfd, path, &how, actual_size)),
+        how.flags);
 #endif /* PAS_COSMO -> so end of !PAS_COSMO */
 }
 
