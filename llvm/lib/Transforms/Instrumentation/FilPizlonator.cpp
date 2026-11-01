@@ -7172,6 +7172,11 @@ class Pizlonator {
   std::unordered_map<Function*, GlobalVariable*> GetterCaches;
 
   bool shouldCacheGetter(GlobalValue* G) {
+    // A JIT module's declarations are host symbols bound through global mappings, whose getters
+    // return constants, and its miss path would reference runtime symbols the shim does not
+    // resolve.
+    if (FJITC)
+      return false;
     if (G->isThreadLocal() || isa<GlobalIFunc>(G))
       return false;
     return G->isDeclaration() || G->isInterposable();
