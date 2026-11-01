@@ -10475,6 +10475,12 @@ static void ensure_api_slow(filc_thread* my_thread)
     const char* env = secure_getenv("FILC_LLVMJIT_SO");
     if (env && env[0])
         try_load_one(env);
+#ifdef FILC_LLVMJIT_SO_PATH
+    /* Distributions that do not install the shim at ../libexec relative to libpizlo.so (such as
+       Nix, where each lives in its own store path) can compile in its location. */
+    if (!api)
+        try_load_one(FILC_LLVMJIT_SO_PATH);
+#endif
     if (!api) {
         Dl_info info;
         if (dladdr((void*)ensure_api_slow, &info) && info.dli_fname) {
