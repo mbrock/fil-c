@@ -131,6 +131,12 @@ RUNTIME_RUNTIME_API = [
     "filc_memmove_heap_to_stack",
     "filc_memmove_already_checked_stack",
     "filc_memmove_stack",
+    "filc_pollcheck_slow",
+    "filc_current_marking_state",
+    "filc_strong_cas_ptr_with_manual_tracking",
+    "filc_global_initialization_thread",
+    "filc_allocate_thread_local",
+    "filc_allocate_thread_local_with_ptrs",
     "filc_global_initialization_start",
     "filc_global_initialization_end",
     "filc_execute_constant_relocations",
@@ -341,8 +347,10 @@ def main():
         inc.write("    .version = SHIM_API_VERSION,\n")
         for _, name, _ in RUNTIME_COMPILETIME_API:
             inc.write("    .%s = %s,\n" % (name, name))
+        # Take addresses explicitly: some entries are data (such as
+        # filc_current_marking_state), whose value is not the address.
         for name in RUNTIME_RUNTIME_API:
-            inc.write("    .%s = %s,\n" % (name, name))
+            inc.write("    .%s = (void*)&%s,\n" % (name, name))
     print("wrote %s" % OUT_RUNTIME_INC)
 
     with open(OUT_MAPPING_INC, "w") as inc:
