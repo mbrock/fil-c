@@ -2338,6 +2338,8 @@ class Pizlonator {
     LowerAsInt->addIncoming(ConstantInt::get(IntPtrTy, 0), OriginalB);
     LowerAsInt->addIncoming(LowerAsIntLoad, LowerAsIntLoad->getParent());
     PHINode* NullAuxLowerAsInt = LowerAsInt;
+    // True on the null-aux edge of a zmark_shared object; see the end of this function.
+    PHINode* SharedEdge = nullptr;
 
     auto FinishCreatingFlight = [&] (Instruction* Where) {
       Instruction* LowerToPtr = new IntToPtrInst(
@@ -2347,7 +2349,21 @@ class Pizlonator {
         RawPtrTy, MAD.P, "filc_atomic_case_load_raw_ptr", isVolatile, std::max(A, Align(WordSize)), AO,
         SyncScope::System, Where);
       RawPtrLoad->setDebugLoc(InsertBefore->getDebugLoc());
-      return createFlightPtr(LowerToPtr, RawPtrLoad, Where);
+      Value* Lower = LowerToPtr;
+      if (SharedEdge) {
+        // A null address loaded from a shared object has no capability.
+        Instruction* RawIsNull = new ICmpInst(
+          Where, ICmpInst::ICMP_EQ, RawPtrLoad, RawNull, "filc_shared_raw_is_null");
+        RawIsNull->setDebugLoc(InsertBefore->getDebugLoc());
+        Instruction* DropLower = BinaryOperator::Create(
+          Instruction::And, SharedEdge, RawIsNull, "filc_shared_drop_lower", Where);
+        DropLower->setDebugLoc(InsertBefore->getDebugLoc());
+        Instruction* Select = SelectInst::Create(
+          DropLower, RawNull, LowerToPtr, "filc_shared_lower", Where);
+        Select->setDebugLoc(InsertBefore->getDebugLoc());
+        Lower = Select;
+      }
+      return createFlightPtr(Lower, RawPtrLoad, Where);
     };
     
     if (MAD.MK == MemoryKind::Heap) {
@@ -2383,31 +2399,26 @@ class Pizlonator {
       LowerAsInt = NewLowerAsInt;
     }
     if (MAD.MK == MemoryKind::Heap && MAD.Lower) {
-      // An object without aux may be zmark_shared. Then a non-null address gets the object's own
-      // capability, computed here without a call: the flags are in the aux word, and the address
-      // is loaded again to see whether it is null. A race between the two address loads can only
-      // give (null, O's capability) or (address, no capability), which are both safe.
+      // An object without aux may be zmark_shared. Then the loaded address gets the object's own
+      // capability, or none when it is null, computed without a call: the flags are in the aux
+      // word. The null test uses the address the program gets (FinishCreatingFlight), so a racing
+      // writer cannot make a valid address come back without a capability.
       DebugLoc DL = InsertBefore->getDebugLoc();
       BasicBlock* NullB = BasicBlock::Create(C, "filc_load_null_aux", NewF, NullAuxJoinB);
       OriginalB->getTerminator()->replaceSuccessorWith(NullAuxJoinB, NullB);
       Instruction* NullTerm = BranchInst::Create(NullAuxJoinB, NullB);
       Value* IsShared = sharedFlagForLower(MAD.Lower, NullTerm);
-      Instruction* Raw = new LoadInst(
-        IntPtrTy, MAD.P, "filc_shared_raw_ptr", false, std::max(A, Align(WordSize)), NullTerm);
-      Raw->setDebugLoc(DL);
-      Instruction* RawNotNull = new ICmpInst(
-        NullTerm, ICmpInst::ICMP_NE, Raw, ConstantInt::get(IntPtrTy, 0), "filc_shared_raw_not_null");
-      RawNotNull->setDebugLoc(DL);
-      Instruction* UseLower = BinaryOperator::Create(
-        Instruction::And, IsShared, RawNotNull, "filc_shared_use_lower", NullTerm);
-      UseLower->setDebugLoc(DL);
       Instruction* LowerInt = new PtrToIntInst(MAD.Lower, IntPtrTy, "filc_shared_lower", NullTerm);
       LowerInt->setDebugLoc(DL);
       Instruction* SharedLower = SelectInst::Create(
-        UseLower, LowerInt, ConstantInt::get(IntPtrTy, 0), "filc_shared_lower_or_null", NullTerm);
+        IsShared, LowerInt, ConstantInt::get(IntPtrTy, 0), "filc_shared_lower_or_null", NullTerm);
       SharedLower->setDebugLoc(DL);
       NullAuxLowerAsInt->setIncomingValueForBlock(OriginalB, SharedLower);
       NullAuxLowerAsInt->replaceIncomingBlockWith(OriginalB, NullB);
+      SharedEdge = PHINode::Create(Int1Ty, 2, "filc_shared_edge", NullAuxLowerAsInt->getNextNode());
+      SharedEdge->setDebugLoc(DL);
+      for (BasicBlock* Pred : predecessors(NullAuxJoinB))
+        SharedEdge->addIncoming(Pred == NullB ? IsShared : ConstantInt::getFalse(Int1Ty), Pred);
     }
     return FinishCreatingFlight(InsertBefore);
   }
