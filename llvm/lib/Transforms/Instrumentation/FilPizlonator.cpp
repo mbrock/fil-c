@@ -2240,6 +2240,25 @@ class Pizlonator {
   // True when the heap object whose aux base is AuxBaseP is a zmark_shared object. Such an object
   // never has an aux, so the flags are loaded only when AuxBaseP is null, and code that touches
   // ordinary objects with an aux pays only the null test it already does.
+  // The flags of the object at Lower, loaded monotonic, since zmark_shared, ensure-aux and free
+  // CAS the aux word concurrently.
+  Value* sharedFlagForLower(Value* Lower, Instruction* InsertBefore) {
+    DebugLoc DL = InsertBefore->getDebugLoc();
+    Instruction* Aux = new LoadInst(
+      IntPtrTy, ptrToAuxForLower(Lower, InsertBefore), "filc_object_aux_load_atomic", false,
+      Align(WordSize), AtomicOrdering::Monotonic, SyncScope::System, InsertBefore);
+    Aux->setDebugLoc(DL);
+    Instruction* Masked = BinaryOperator::Create(
+      Instruction::And, Aux,
+      ConstantInt::get(IntPtrTy, static_cast<uint64_t>(ObjectFlagShared) << ObjectAuxFlagsShift),
+      "filc_shared_flag", InsertBefore);
+    Masked->setDebugLoc(DL);
+    Instruction* IsShared = new ICmpInst(
+      InsertBefore, ICmpInst::ICMP_NE, Masked, ConstantInt::get(IntPtrTy, 0), "filc_is_shared");
+    IsShared->setDebugLoc(DL);
+    return IsShared;
+  }
+
   Value* isSharedNullAux(Value* AuxBaseP, Value* Lower, Instruction* InsertBefore) {
     DebugLoc DL = InsertBefore->getDebugLoc();
     Instruction* AuxIsNull = new ICmpInst(
@@ -2247,13 +2266,7 @@ class Pizlonator {
     AuxIsNull->setDebugLoc(DL);
     BasicBlock* OrigB = InsertBefore->getParent();
     Instruction* NullTerm = SplitBlockAndInsertIfThen(AuxIsNull, InsertBefore, false);
-    Instruction* Masked = BinaryOperator::Create(
-      Instruction::And, flagsForLower(Lower, NullTerm), ConstantInt::get(IntPtrTy, ObjectFlagShared),
-      "filc_shared_flag", NullTerm);
-    Masked->setDebugLoc(DL);
-    Instruction* IsShared = new ICmpInst(
-      NullTerm, ICmpInst::ICMP_NE, Masked, ConstantInt::get(IntPtrTy, 0), "filc_is_shared");
-    IsShared->setDebugLoc(DL);
+    Value* IsShared = sharedFlagForLower(Lower, NullTerm);
     PHINode* Result = PHINode::Create(Int1Ty, 2, "filc_is_shared_phi", InsertBefore);
     Result->setDebugLoc(DL);
     Result->addIncoming(ConstantInt::getFalse(Int1Ty), OrigB);
@@ -2382,13 +2395,7 @@ class Pizlonator {
     OriginalB->getTerminator()->replaceSuccessorWith(NullAuxJoinB, NullB);
     NullAuxLowerAsInt->replaceIncomingBlockWith(OriginalB, NullB);
     Instruction* NullTerm = BranchInst::Create(NullAuxJoinB, NullB);
-    Instruction* Masked = BinaryOperator::Create(
-      Instruction::And, flagsForLower(MAD.Lower, NullTerm),
-      ConstantInt::get(IntPtrTy, ObjectFlagShared), "filc_shared_flag", NullTerm);
-    Masked->setDebugLoc(DL);
-    Instruction* IsShared = new ICmpInst(
-      NullTerm, ICmpInst::ICMP_NE, Masked, ConstantInt::get(IntPtrTy, 0), "filc_is_shared");
-    IsShared->setDebugLoc(DL);
+    Value* IsShared = sharedFlagForLower(MAD.Lower, NullTerm);
     ReplaceInstWithInst(
       NullTerm, BranchInst::Create(SharedB, NullAuxJoinB, expectFalse(IsShared, NullTerm)));
     Instruction* SharedTerm = BranchInst::Create(NullAuxJoinB, SharedB);

@@ -4120,6 +4120,8 @@ void filc_native_zmark_shared(filc_thread* my_thread, filc_ptr ptr)
         NULL,
         "zmark_shared needs a mapping that no pointer has been stored into (ptr = %s).",
         filc_ptr_to_new_string(ptr));
+    /* A usage guard, not a safety check: the mapping can be replaced right after this (MAP_FIXED,
+       mremap), and the rule is sound for any mmap object, since loads never trust its bytes. */
     filc_exit(my_thread);
     bool is_shared_mapping = range_is_shared_mapping(
         (char*)filc_object_lower(object), (char*)filc_object_upper(object));
@@ -6554,9 +6556,14 @@ static size_t demote_cc_from_heap(filc_thread* my_thread, filc_ptr ptr, const fi
     }
 
     char* aux_ptr = filc_ptr_aux_ptr(ptr);
+    bool is_shared = filc_object_is_shared(filc_ptr_object(ptr));
     for (offset = 0; offset < available; offset += FILC_WORD_SIZE) {
         void* lower;
-        if (aux_ptr) {
+        if (is_shared) {
+            lower = filc_shared_object_lower_for_ptr(
+                filc_ptr_object(ptr),
+                *(void**)filc_thread_cc_slot_at_offset(my_thread, offset));
+        } else if (aux_ptr) {
             lower = filc_lower_or_box_extract_lower(
                 filc_lower_or_box_load_unfenced((filc_lower_or_box*)(
                                                     aux_ptr + filc_ptr_offset(ptr) + offset)));

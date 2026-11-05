@@ -2809,16 +2809,16 @@ static inline void* filc_object_upper(filc_object* object)
     return filc_object_upper_not_null(object);
 }
 
-/* The capability that a pointer word loaded from the zmark_shared object gets: the object's own,
-   when the loaded address is within lower..upper (one past the end included), and none otherwise.
-   The capability never comes from the shared bytes, only from the loader's own header for the
-   object, so a loaded pointer never has more authority than the loader already used to load it. */
+/* The capability that a pointer word loaded from the zmark_shared object gets: none for a null
+   address, the object's own for any other. The capability never comes from the shared bytes, only
+   from the loader's own header for the object, so a loaded pointer never has more authority than
+   the loader already used to load it. Out-of-range addresses keep it too, since every access is
+   bounds-checked against it anyway; that keeps tagged and offset pointers working. */
 static inline void* filc_shared_object_lower_for_ptr(filc_object* object, void* raw_ptr)
 {
-    char* lower = (char*)filc_object_lower(object);
-    if ((char*)raw_ptr >= lower && (char*)raw_ptr <= (char*)filc_object_upper(object))
-        return lower;
-    return NULL;
+    if (!raw_ptr)
+        return NULL;
+    return filc_object_lower(object);
 }
 
 static inline size_t filc_object_size_not_null(filc_object* object)

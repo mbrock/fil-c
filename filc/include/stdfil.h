@@ -221,12 +221,14 @@ filc_bool zhasvalidcap(void* ptr);
    After zmark_shared, the mapping holds addresses only:
 
    - A pointer loaded from the mapping (by any load, atomic, compare-and-swap, exchange, or memcpy
-     out of it) gets the mapping's capability if its address is within the mapping, and no
-     capability otherwise. Whatever another process, a native process, or a stray integer write
-     put there, the loaded pointer can only reach this mapping.
-   - A pointer stored into the mapping must be null or point into this same mapping; storing any
-     other pointer (private memory, another mapping, a function) is a safety panic, since no other
-     process could use it.
+     out of it) gets the mapping's capability, or none if it is null. Whatever another process, a
+     native process, or a stray integer write put there, the loaded pointer can only reach this
+     mapping.
+   - A pointer stored into the mapping must be null or have this same mapping's capability; storing
+     any other pointer (private memory, another mapping, a function) panics, since no process,
+     the storing one included, could use it after reading it back. memcpy into the mapping checks
+     whole, aligned pointer words the same way; other copies write bytes only.
+   - va_arg from a va_list kept in the mapping gives pointers no capability.
 
    The mapping must start at ptr, come from mmap with MAP_SHARED or from shmat, and have had no
    pointer stored into it yet; anything else panics. Marking an already marked mapping does
