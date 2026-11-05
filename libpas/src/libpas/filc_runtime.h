@@ -203,7 +203,17 @@ typedef uintptr_t filc_word;
                                                                      marked. */
 #define FILC_OBJECT_FLAG_WEAK_KEY         ((filc_object_flags)32) /* The object is being used as a key
                                                                      in one or more weak maps. */
-/* We have flag bit value 64 available. */
+#define FILC_OBJECT_FLAG_SHARED           ((filc_object_flags)64) /* zmark_shared: a shared mapping
+                                                                     whose bytes no process trusts.
+                                                                     It never has an aux. A pointer
+                                                                     loaded from it gets this object's
+                                                                     capability if its address is
+                                                                     within lower..upper, else none; a
+                                                                     pointer stored into it must be
+                                                                     null or have this object's
+                                                                     capability, and only its address
+                                                                     is written. Set only by
+                                                                     zmark_shared, never cleared. */
 #define FILC_OBJECT_FLAGS_SPECIAL_SHIFT   ((filc_object_flags)7)  /* The shift amount to get to the
                                                                      special type. */
 #define FILC_OBJECT_FLAGS_MASK            ((1 << FILC_OBJECT_FLAGS_SPECIAL_SHIFT) - 1)
@@ -2495,6 +2505,11 @@ static PAS_ALWAYS_INLINE char* filc_object_ensure_aux_ptr_without_exiting(filc_t
 }
 
 char* filc_object_ensure_aux_ptr_outline(filc_thread* my_thread, filc_object* object);
+/* Like filc_object_ensure_aux_ptr_outline, but returns NULL for a zmark_shared object instead of
+   panicking. Compiled code that calls this checks for NULL and stores through
+   filc_store_ptr_atomic_outline, which handles shared objects. */
+PAS_API char* filc_object_ensure_aux_ptr_or_shared_outline(filc_thread* my_thread,
+                                                           filc_object* object);
 
 static inline filc_lower_or_box* filc_object_lower_or_box_ptr_at_offset(filc_object* object,
                                                                         size_t offset)
@@ -2603,6 +2618,18 @@ static inline filc_lower_or_box filc_lower_or_box_create_box(filc_atomic_box* bo
 static inline filc_object_flags filc_object_get_flags(filc_object* object)
 {
     return filc_aux_get_flags(filc_object_aux(object));
+}
+
+/* True for a zmark_shared object. Such an object never gets an aux (ensure_aux panics), so the
+   aux word of a shared object always has a null aux pointer. */
+static inline bool filc_aux_is_shared(uintptr_t aux)
+{
+    return !filc_aux_get_ptr(aux) && !!(filc_aux_get_flags(aux) & FILC_OBJECT_FLAG_SHARED);
+}
+
+static inline bool filc_object_is_shared(filc_object* object)
+{
+    return filc_aux_is_shared(filc_object_aux(object));
 }
 
 static inline bool filc_object_is_markable(filc_object* object)
@@ -2780,6 +2807,18 @@ static inline void* filc_object_upper(filc_object* object)
     if (!object)
         return NULL;
     return filc_object_upper_not_null(object);
+}
+
+/* The capability that a pointer word loaded from the zmark_shared object gets: the object's own,
+   when the loaded address is within lower..upper (one past the end included), and none otherwise.
+   The capability never comes from the shared bytes, only from the loader's own header for the
+   object, so a loaded pointer never has more authority than the loader already used to load it. */
+static inline void* filc_shared_object_lower_for_ptr(filc_object* object, void* raw_ptr)
+{
+    char* lower = (char*)filc_object_lower(object);
+    if ((char*)raw_ptr >= lower && (char*)raw_ptr <= (char*)filc_object_upper(object))
+        return lower;
+    return NULL;
 }
 
 static inline size_t filc_object_size_not_null(filc_object* object)
@@ -3455,10 +3494,41 @@ static inline filc_ptr filc_atomic_box_cas_strong_without_barrier(filc_atomic_bo
     return filc_flight_ptr_unbarriered_strong_cas(&box->ptr, expected, new_value);
 }
 
+
+PAS_API PAS_NO_RETURN PAS_NEVER_INLINE void filc_shared_store_fail(filc_object* object,
+                                                                   filc_ptr value);
+
+/* A pointer stored into a zmark_shared object must be null or have the object's own capability:
+   only its address is written, and readers give it back that capability. */
+static inline void filc_check_shared_store(filc_object* object, filc_ptr value)
+{
+    void* lower = filc_ptr_lower(value);
+    if (PAS_LIKELY(!lower || lower == filc_object_lower(object)))
+        return;
+    filc_shared_store_fail(object, value);
+}
+
+/* Pointer access to a zmark_shared object. The caller has checked the access. Only the address
+   word is read or written; the shared bytes never supply a capability. */
+static inline filc_ptr filc_load_ptr_shared_with_manual_tracking(filc_ptr ptr)
+{
+    void* raw_ptr = __atomic_load_n((void**)filc_ptr_ptr(ptr), __ATOMIC_SEQ_CST);
+    return filc_ptr_create_with_lower_and_ptr_and_manual_tracking(
+        filc_shared_object_lower_for_ptr(filc_ptr_object(ptr), raw_ptr), raw_ptr);
+}
+
+static inline void filc_store_ptr_shared(filc_ptr ptr, filc_ptr value, int memory_order)
+{
+    filc_check_shared_store(filc_ptr_object(ptr), value);
+    __atomic_store_n((void**)filc_ptr_ptr(ptr), filc_ptr_ptr(value), memory_order);
+}
+
 static inline filc_ptr filc_load_ptr_with_manual_tracking(filc_ptr ptr, ptrdiff_t offset)
 {
     ptr = filc_ptr_with_offset(ptr, offset);
     filc_check_native_access(ptr, sizeof(void*), filc_read_access);
+    if (PAS_UNLIKELY(filc_object_is_shared(filc_ptr_object(ptr))))
+        return filc_load_ptr_shared_with_manual_tracking(ptr);
     filc_lower_or_box lower_or_box = filc_ptr_load_lower_or_box_unfenced(ptr);
     void* lower;
     if (filc_lower_or_box_is_box(lower_or_box)) {
@@ -3485,6 +3555,8 @@ static inline filc_ptr filc_load_ptr_atomic_with_manual_tracking(filc_ptr ptr, p
 {
     ptr = filc_ptr_with_offset(ptr, offset);
     filc_check_native_access(ptr, sizeof(void*), filc_read_access);
+    if (PAS_UNLIKELY(filc_object_is_shared(filc_ptr_object(ptr))))
+        return filc_load_ptr_shared_with_manual_tracking(ptr);
     void* raw_ptr = *(void**)filc_ptr_ptr(ptr);
     pas_load_load_fence();
     filc_lower_or_box lower_or_box = filc_ptr_load_lower_or_box(ptr);
@@ -3501,6 +3573,10 @@ static inline void filc_store_ptr(filc_thread* my_thread, filc_ptr ptr, ptrdiff_
 {
     ptr = filc_ptr_with_offset(ptr, offset);
     filc_check_native_access(ptr, sizeof(void*), filc_write_access);
+    if (PAS_UNLIKELY(filc_object_is_shared(filc_ptr_object(ptr)))) {
+        filc_store_ptr_shared(ptr, value, __ATOMIC_RELAXED);
+        return;
+    }
     filc_lower_or_box* lower_or_box_ptr = filc_ptr_ensure_lower_or_box_ptr(my_thread, ptr);
     filc_store_barrier(my_thread, filc_ptr_object(value));
     filc_lower_or_box_store_unfenced_unbarriered(
@@ -3538,6 +3614,10 @@ static inline void filc_store_ptr_atomic(filc_thread* my_thread, filc_ptr ptr, p
 {
     ptr = filc_ptr_with_offset(ptr, offset);
     filc_check_native_access(ptr, sizeof(void*), filc_write_access);
+    if (PAS_UNLIKELY(filc_object_is_shared(filc_ptr_object(ptr)))) {
+        filc_store_ptr_shared(ptr, value, __ATOMIC_SEQ_CST);
+        return;
+    }
     filc_lower_or_box* lower_or_box_ptr = filc_ptr_ensure_lower_or_box_ptr(my_thread, ptr);
     filc_store_ptr_atomic_with_ptr_pair(my_thread, (void**)filc_ptr_ptr(ptr), lower_or_box_ptr,
                                         value);

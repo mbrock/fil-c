@@ -213,6 +213,27 @@ filc_bool zis_readonly(void* ptr);
 /* Tells if the pointer has a capability and that capability is not free. */
 filc_bool zhasvalidcap(void* ptr);
 
+/* Marks the shared mapping that starts at ptr, as returned by mmap(MAP_SHARED) or shmat, so that
+   processes sharing it can share pointers into it.
+
+   A shared mapping's bytes are visible to other processes, but the capabilities of pointers stored
+   in it are private to the storing process, so other processes read such pointers without one.
+   After zmark_shared, the mapping holds addresses only:
+
+   - A pointer loaded from the mapping (by any load, atomic, compare-and-swap, exchange, or memcpy
+     out of it) gets the mapping's capability if its address is within the mapping, and no
+     capability otherwise. Whatever another process, a native process, or a stray integer write
+     put there, the loaded pointer can only reach this mapping.
+   - A pointer stored into the mapping must be null or point into this same mapping; storing any
+     other pointer (private memory, another mapping, a function) is a safety panic, since no other
+     process could use it.
+
+   The mapping must start at ptr, come from mmap with MAP_SHARED or from shmat, and have had no
+   pointer stored into it yet; anything else panics. Marking an already marked mapping does
+   nothing. The mark is inherited across fork, so mark before forking. munmap of the whole mapping
+   frees it as usual, and mremap returns an unmarked mapping. */
+void zmark_shared(void* ptr);
+
 /* Tells if the pointer is in bounds of lower/upper. This is a guarantee that a 1 byte access will
    succeed on this pointer. */
 static inline __attribute__((__always_inline__)) filc_bool zinbounds(void* ptr)
