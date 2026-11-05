@@ -226,8 +226,9 @@ filc_bool zhasvalidcap(void* ptr);
      mapping.
    - A pointer stored into the mapping must be null or have this same mapping's capability; storing
      any other pointer (private memory, another mapping, a function) panics, since no process,
-     the storing one included, could use it after reading it back. memcpy into the mapping checks
-     whole, aligned pointer words the same way; other copies write bytes only.
+     the storing one included, could use it after reading it back. memcpy and memmove into the
+     mapping copy bytes only and check nothing, because integer data in Fil-C can keep a stale
+     capability from a pointer once stored in the same word.
    - va_arg from a va_list kept in the mapping gives pointers no capability.
 
    The mapping must start at ptr, come from mmap with MAP_SHARED or from shmat, and have had no

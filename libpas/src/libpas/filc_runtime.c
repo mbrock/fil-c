@@ -5674,40 +5674,29 @@ PAS_ALWAYS_INLINE static void memmove_aux_with_ptrs(
 }
 
 /* The aux side of a copy whose source or destination is a zmark_shared object; the payload has
-   been copied already. dst_payload and src_payload are where the copy starts, and dst_aux and
-   src_aux are the aux addresses for those bytes (NULL when there is no aux). dst_object is the
-   heap destination or NULL for a stack one, and src_object the heap source or NULL.
+   been copied already. dst_payload is where the copy starts, and dst_aux the aux address for those
+   bytes (NULL when there is no aux). dst_object is the heap destination or NULL for a stack one,
+   and src_object the heap source or NULL.
 
-   Into a shared object only the bytes go, and like a pointer store the copy refuses capabilities
-   other than the object's own. Out of a shared object, each fully copied word gets the source's
-   capability when its address lies within the source, as a pointer load would give it, and
-   partially copied words lose theirs. */
+   Into a shared object only the bytes go. Out of a shared object, each fully copied word gets the
+   source's capability when its address is non-null, as a pointer load would give it, and partially
+   copied words lose theirs. */
 static PAS_NEVER_INLINE void memmove_aux_shared(
     filc_thread* my_thread, char* dst_payload, char* dst_aux, filc_object* dst_object,
-    char* src_payload, char* src_aux, filc_object* src_object, filc_memory_kind src_memory_kind,
-    size_t count, filc_exit_allowed_mode exit_allowed, const filc_origin* origin)
+    filc_object* src_object, size_t count, filc_exit_allowed_mode exit_allowed,
+    const filc_origin* origin)
 {
     char* full_begin = (char*)pas_round_up_to_power_of_2((uintptr_t)dst_payload, FILC_WORD_SIZE);
     char* full_end = (char*)pas_round_down_to_power_of_2((uintptr_t)dst_payload + count,
                                                          FILC_WORD_SIZE);
     char* word;
 
-    if (dst_object && filc_object_is_shared(dst_object)) {
-        void* allowed_lower = filc_object_lower(dst_object);
-        if (!src_aux || (((uintptr_t)dst_payload ^ (uintptr_t)src_payload) & (FILC_WORD_SIZE - 1)))
-            return;
-        for (word = full_begin; word < full_end; word += FILC_WORD_SIZE) {
-            void* lower = load_lower_for_memmove(src_aux, word - dst_payload, src_memory_kind);
-            FILC_CHECK(
-                !lower || lower == allowed_lower,
-                origin,
-                "cannot copy a pointer with capability %s into zmark_shared object %s; only null "
-                "or pointers into the same object may be stored there.",
-                filc_object_to_new_string(filc_object_for_lower(lower)),
-                filc_object_to_new_string(dst_object));
-        }
+    /* Only bytes go into a shared object. A source word's capability is not checked: Fil-C keeps a
+       word's capability across integer stores, so ordinary integer data often carries a stale one
+       (a heap tuple whose first word was once a freelist link), and loads from the shared object
+       never trust its bytes anyway. */
+    if (dst_object && filc_object_is_shared(dst_object))
         return;
-    }
 
     PAS_ASSERT(src_object && filc_object_is_shared(src_object));
     if (!dst_aux) {
@@ -5833,8 +5822,7 @@ PAS_ALWAYS_INLINE static void memmove_size_specialized(
     size_t src_start_offset = src_start - src_lower;
     if (PAS_UNLIKELY(filc_object_is_shared(dst_object) || filc_object_is_shared(src_object))) {
         memmove_aux_shared(my_thread, dst_start, dst_aux_ptr ? dst_aux_ptr + dst_start_offset : NULL,
-                           dst_object, src_start, src_aux_ptr ? src_aux_ptr + src_start_offset : NULL,
-                           src_object, filc_heap_memory, count, exit_allowed, origin);
+                           dst_object, src_object, count, exit_allowed, origin);
         return;
     }
     size_t dst_end_offset = dst_start_offset + count;
@@ -6097,8 +6085,7 @@ static PAS_ALWAYS_INLINE void copy_stack_to_heap_already_checked(
         filc_memcpy_small_up(dst_start, src_payload, count);
 
     if (PAS_UNLIKELY(filc_object_is_shared(dst_object))) {
-        memmove_aux_shared(my_thread, dst_start, NULL, dst_object, (char*)src_payload,
-                           (char*)src_aux, NULL, filc_stack_memory, count, exit_allowed,
+        memmove_aux_shared(my_thread, dst_start, NULL, dst_object, NULL, count, exit_allowed,
                            passed_origin);
         return;
     }
@@ -6151,8 +6138,8 @@ static PAS_ALWAYS_INLINE void copy_heap_to_stack_already_checked(
         filc_memcpy_small_up(dst_payload, src_start, count);
 
     if (PAS_UNLIKELY(filc_object_is_shared(src_object))) {
-        memmove_aux_shared(my_thread, (char*)dst_payload, (char*)dst_aux, NULL, src_start, NULL,
-                           src_object, filc_heap_memory, count, exit_allowed, passed_origin);
+        memmove_aux_shared(my_thread, (char*)dst_payload, (char*)dst_aux, NULL, src_object, count,
+                           exit_allowed, passed_origin);
         return;
     }
 
