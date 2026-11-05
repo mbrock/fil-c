@@ -2382,36 +2382,34 @@ class Pizlonator {
       NewLowerAsInt->addIncoming(LowerFromBoxLoadInt, ElseTerm->getParent());
       LowerAsInt = NewLowerAsInt;
     }
-    Value* Result = FinishCreatingFlight(InsertBefore);
-    if (MAD.MK != MemoryKind::Heap || !MAD.Lower)
-      return Result;
-
-    // An object without aux may be zmark_shared. Then the runtime loads the address and gives it
-    // the object's own capability (or none, if it points outside the object).
-    DebugLoc DL = InsertBefore->getDebugLoc();
-    Function* F = OriginalB->getParent();
-    BasicBlock* NullB = BasicBlock::Create(C, "filc_load_null_aux", F, NullAuxJoinB);
-    BasicBlock* SharedB = BasicBlock::Create(C, "filc_load_shared", F, NullAuxJoinB);
-    OriginalB->getTerminator()->replaceSuccessorWith(NullAuxJoinB, NullB);
-    NullAuxLowerAsInt->replaceIncomingBlockWith(OriginalB, NullB);
-    Instruction* NullTerm = BranchInst::Create(NullAuxJoinB, NullB);
-    Value* IsShared = sharedFlagForLower(MAD.Lower, NullTerm);
-    ReplaceInstWithInst(
-      NullTerm, BranchInst::Create(SharedB, NullAuxJoinB, expectFalse(IsShared, NullTerm)));
-    Instruction* SharedTerm = BranchInst::Create(NullAuxJoinB, SharedB);
-    storeOrigin(getOrigin(DL), SharedTerm);
-    Instruction* SharedResult = CallInst::Create(
-      LoadPtrAtomicOutline, { createFlightPtr(MAD.Lower, MAD.P, SharedTerm) }, "filc_shared_load",
-      SharedTerm);
-    SharedResult->setDebugLoc(DL);
-    BasicBlock* NormalB = InsertBefore->getParent();
-    BasicBlock* DoneB = SplitBlock(NormalB, InsertBefore);
-    SharedTerm->setSuccessor(0, DoneB);
-    PHINode* Phi = PHINode::Create(FlightPtrTy, 2, "filc_load_ptr_phi", InsertBefore);
-    Phi->setDebugLoc(DL);
-    Phi->addIncoming(Result, NormalB);
-    Phi->addIncoming(SharedResult, SharedB);
-    return Phi;
+    if (MAD.MK == MemoryKind::Heap && MAD.Lower) {
+      // An object without aux may be zmark_shared. Then a non-null address gets the object's own
+      // capability, computed here without a call: the flags are in the aux word, and the address
+      // is loaded again to see whether it is null. A race between the two address loads can only
+      // give (null, O's capability) or (address, no capability), which are both safe.
+      DebugLoc DL = InsertBefore->getDebugLoc();
+      BasicBlock* NullB = BasicBlock::Create(C, "filc_load_null_aux", NewF, NullAuxJoinB);
+      OriginalB->getTerminator()->replaceSuccessorWith(NullAuxJoinB, NullB);
+      Instruction* NullTerm = BranchInst::Create(NullAuxJoinB, NullB);
+      Value* IsShared = sharedFlagForLower(MAD.Lower, NullTerm);
+      Instruction* Raw = new LoadInst(
+        IntPtrTy, MAD.P, "filc_shared_raw_ptr", false, std::max(A, Align(WordSize)), NullTerm);
+      Raw->setDebugLoc(DL);
+      Instruction* RawNotNull = new ICmpInst(
+        NullTerm, ICmpInst::ICMP_NE, Raw, ConstantInt::get(IntPtrTy, 0), "filc_shared_raw_not_null");
+      RawNotNull->setDebugLoc(DL);
+      Instruction* UseLower = BinaryOperator::Create(
+        Instruction::And, IsShared, RawNotNull, "filc_shared_use_lower", NullTerm);
+      UseLower->setDebugLoc(DL);
+      Instruction* LowerInt = new PtrToIntInst(MAD.Lower, IntPtrTy, "filc_shared_lower", NullTerm);
+      LowerInt->setDebugLoc(DL);
+      Instruction* SharedLower = SelectInst::Create(
+        UseLower, LowerInt, ConstantInt::get(IntPtrTy, 0), "filc_shared_lower_or_null", NullTerm);
+      SharedLower->setDebugLoc(DL);
+      NullAuxLowerAsInt->setIncomingValueForBlock(OriginalB, SharedLower);
+      NullAuxLowerAsInt->replaceIncomingBlockWith(OriginalB, NullB);
+    }
+    return FinishCreatingFlight(InsertBefore);
   }
 
   Value* loadPtr(MemoryAccessData MAD, Instruction* InsertBefore) {
