@@ -2338,32 +2338,22 @@ class Pizlonator {
     LowerAsInt->addIncoming(ConstantInt::get(IntPtrTy, 0), OriginalB);
     LowerAsInt->addIncoming(LowerAsIntLoad, LowerAsIntLoad->getParent());
     PHINode* NullAuxLowerAsInt = LowerAsInt;
-    // True on the null-aux edge of a zmark_shared object; see the end of this function.
-    PHINode* SharedEdge = nullptr;
+    // The address, when it is loaded before the join; see the end of this function.
+    PHINode* RawPhi = nullptr;
 
     auto FinishCreatingFlight = [&] (Instruction* Where) {
       Instruction* LowerToPtr = new IntToPtrInst(
         LowerAsInt, RawPtrTy, "filc_lower_as_ptr", Where);
       LowerToPtr->setDebugLoc(InsertBefore->getDebugLoc());
-      Instruction* RawPtrLoad = new LoadInst(
-        RawPtrTy, MAD.P, "filc_atomic_case_load_raw_ptr", isVolatile, std::max(A, Align(WordSize)), AO,
-        SyncScope::System, Where);
-      RawPtrLoad->setDebugLoc(InsertBefore->getDebugLoc());
-      Value* Lower = LowerToPtr;
-      if (SharedEdge) {
-        // A null address loaded from a shared object has no capability.
-        Instruction* RawIsNull = new ICmpInst(
-          Where, ICmpInst::ICMP_EQ, RawPtrLoad, RawNull, "filc_shared_raw_is_null");
-        RawIsNull->setDebugLoc(InsertBefore->getDebugLoc());
-        Instruction* DropLower = BinaryOperator::Create(
-          Instruction::And, SharedEdge, RawIsNull, "filc_shared_drop_lower", Where);
-        DropLower->setDebugLoc(InsertBefore->getDebugLoc());
-        Instruction* Select = SelectInst::Create(
-          DropLower, RawNull, LowerToPtr, "filc_shared_lower", Where);
-        Select->setDebugLoc(InsertBefore->getDebugLoc());
-        Lower = Select;
+      Value* RawPtrLoad = RawPhi;
+      if (!RawPtrLoad) {
+        Instruction* RawPtrLoadInst = new LoadInst(
+          RawPtrTy, MAD.P, "filc_atomic_case_load_raw_ptr", isVolatile, std::max(A, Align(WordSize)),
+          AO, SyncScope::System, Where);
+        RawPtrLoadInst->setDebugLoc(InsertBefore->getDebugLoc());
+        RawPtrLoad = RawPtrLoadInst;
       }
-      return createFlightPtr(Lower, RawPtrLoad, Where);
+      return createFlightPtr(LowerToPtr, RawPtrLoad, Where);
     };
     
     if (MAD.MK == MemoryKind::Heap) {
@@ -2401,24 +2391,40 @@ class Pizlonator {
     if (MAD.MK == MemoryKind::Heap && MAD.Lower) {
       // An object without aux may be zmark_shared. Then the loaded address gets the object's own
       // capability, or none when it is null, computed without a call: the flags are in the aux
-      // word. The null test uses the address the program gets (FinishCreatingFlight), so a racing
-      // writer cannot make a valid address come back without a capability.
+      // word. The address is loaded once on each edge into the join and the null test uses the
+      // address the program gets, so a racing writer cannot make a valid address come back
+      // without a capability, and loads from objects with an aux do no extra work.
+      assert(!isVolatile && AO == AtomicOrdering::NotAtomic);
       DebugLoc DL = InsertBefore->getDebugLoc();
+      Align RawAlign = std::max(A, Align(WordSize));
       BasicBlock* NullB = BasicBlock::Create(C, "filc_load_null_aux", NewF, NullAuxJoinB);
       OriginalB->getTerminator()->replaceSuccessorWith(NullAuxJoinB, NullB);
       Instruction* NullTerm = BranchInst::Create(NullAuxJoinB, NullB);
       Value* IsShared = sharedFlagForLower(MAD.Lower, NullTerm);
+      Instruction* NullRaw = new LoadInst(RawPtrTy, MAD.P, "filc_load_raw_ptr", NullTerm);
+      cast<LoadInst>(NullRaw)->setAlignment(RawAlign);
+      NullRaw->setDebugLoc(DL);
+      Instruction* RawNotNull = new ICmpInst(
+        NullTerm, ICmpInst::ICMP_NE, NullRaw, RawNull, "filc_shared_raw_not_null");
+      RawNotNull->setDebugLoc(DL);
+      Instruction* UseLower = BinaryOperator::Create(
+        Instruction::And, IsShared, RawNotNull, "filc_shared_use_lower", NullTerm);
+      UseLower->setDebugLoc(DL);
       Instruction* LowerInt = new PtrToIntInst(MAD.Lower, IntPtrTy, "filc_shared_lower", NullTerm);
       LowerInt->setDebugLoc(DL);
       Instruction* SharedLower = SelectInst::Create(
-        IsShared, LowerInt, ConstantInt::get(IntPtrTy, 0), "filc_shared_lower_or_null", NullTerm);
+        UseLower, LowerInt, ConstantInt::get(IntPtrTy, 0), "filc_shared_lower_or_null", NullTerm);
       SharedLower->setDebugLoc(DL);
       NullAuxLowerAsInt->setIncomingValueForBlock(OriginalB, SharedLower);
       NullAuxLowerAsInt->replaceIncomingBlockWith(OriginalB, NullB);
-      SharedEdge = PHINode::Create(Int1Ty, 2, "filc_shared_edge", NullAuxLowerAsInt->getNextNode());
-      SharedEdge->setDebugLoc(DL);
-      for (BasicBlock* Pred : predecessors(NullAuxJoinB))
-        SharedEdge->addIncoming(Pred == NullB ? IsShared : ConstantInt::getFalse(Int1Ty), Pred);
+      Instruction* AuxRaw = new LoadInst(
+        RawPtrTy, MAD.P, "filc_load_raw_ptr", LowerAsIntLoad->getParent()->getTerminator());
+      cast<LoadInst>(AuxRaw)->setAlignment(RawAlign);
+      AuxRaw->setDebugLoc(DL);
+      RawPhi = PHINode::Create(RawPtrTy, 2, "filc_raw_ptr_phi", NullAuxLowerAsInt->getNextNode());
+      RawPhi->setDebugLoc(DL);
+      RawPhi->addIncoming(NullRaw, NullB);
+      RawPhi->addIncoming(AuxRaw, AuxRaw->getParent());
     }
     return FinishCreatingFlight(InsertBefore);
   }
