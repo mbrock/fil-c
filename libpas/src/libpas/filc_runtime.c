@@ -8955,6 +8955,18 @@ int filc_native_zsys_getpid(filc_thread* my_thread)
     return result;
 }
 
+/* Reports the program break without moving it. brk(0) only queries, never fails, and moves
+   nothing, so it is the native answer to sbrk(0). The result is an integer: Fil-C code that
+   turns it into a pointer gets one without a capability. Fil-C code cannot move the break: its
+   memory comes from the GC heap. */
+unsigned long filc_native_zsys_brk(filc_thread* my_thread)
+{
+    filc_exit(my_thread);
+    unsigned long result = (unsigned long)syscall(SYS_brk, 0);
+    filc_enter(my_thread);
+    return result;
+}
+
 int filc_native_zsys_clock_gettime(filc_thread* my_thread, int clock_id, filc_ptr timespec_ptr)
 {
     /* Fun fact: this syscall is often extremely cheap, like it's a vdso thing.
@@ -12266,6 +12278,31 @@ int filc_native_zsys_prctl(filc_thread* my_thread, int option, filc_cc_cursor* a
     case PR_SET_TSC: {
         unsigned long value = filc_cc_cursor_get_next_unsigned_long(my_thread, args);
         return FILC_SYSCALL(my_thread, prctl(option, value, 0, 0, 0));
+    }
+
+    /* Capability bounding and ambient sets. All arguments are integers, and like any other
+       capability change these affect the calling thread only, as they do natively. */
+    case PR_CAPBSET_READ:
+    case PR_CAPBSET_DROP: {
+        unsigned long value = filc_cc_cursor_get_next_unsigned_long(my_thread, args);
+        return FILC_SYSCALL(my_thread, prctl(option, value, 0, 0, 0));
+    }
+
+    case PR_CAP_AMBIENT: {
+        unsigned long op = filc_cc_cursor_get_next_unsigned_long(my_thread, args);
+        switch (op) {
+        case PR_CAP_AMBIENT_CLEAR_ALL:
+            return FILC_SYSCALL(my_thread, prctl(PR_CAP_AMBIENT, op, 0, 0, 0));
+        case PR_CAP_AMBIENT_IS_SET:
+        case PR_CAP_AMBIENT_RAISE:
+        case PR_CAP_AMBIENT_LOWER: {
+            unsigned long cap = filc_cc_cursor_get_next_unsigned_long(my_thread, args);
+            return FILC_SYSCALL(my_thread, prctl(PR_CAP_AMBIENT, op, cap, 0, 0));
+        }
+        default:
+            filc_set_errno(EINVAL);
+            return -1;
+        }
     }
 
     case PR_SET_PDEATHSIG: {

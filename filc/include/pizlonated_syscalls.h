@@ -60,6 +60,8 @@ unsigned zsys_getgid(void);
 unsigned zsys_getegid(void);
 int zsys_open(const char* path, int flags, ...);
 int zsys_getpid(void);
+/* The current program break, as brk(0) reports it; it never moves the break. */
+unsigned long zsys_brk(void);
 int zsys_clock_gettime(int clock_id, void* timespec_ptr);
 int zsys_fstatat(int fd, const char* path, void* buf, int flag);
 int zsys_fstat(int fd, void* buf);
