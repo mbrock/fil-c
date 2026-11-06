@@ -2572,9 +2572,10 @@ static PAS_NO_RETURN PAS_NEVER_INLINE void ensure_aux_ptr_shared_fail(filc_objec
 {
     filc_safety_panic(NULL,
                       "attempt to store a capability into zmark_shared object %s; only null or "
-                      "pointers into the same object may be stored there. Code that stores "
-                      "pointers into a zmark_shared object must be compiled with -fzmark-shared; "
-                      "without it, every pointer store into the object lands here.\n",
+                      "pointers into the same object may be stored there. Code that stores or "
+                      "copies (memcpy, memmove, struct assignment) into a zmark_shared object must "
+                      "be compiled with -fzmark-shared; without it, pointer stores and small "
+                      "copies of words that carry a capability land here.\n",
                       filc_object_to_new_string(object));
 }
 

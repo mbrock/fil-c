@@ -233,8 +233,10 @@ filc_bool zhasvalidcap(void* ptr);
 
    These rules hold for code compiled with -fzmark-shared. Code compiled without it is unchanged
    and fails safe on a marked mapping: pointers it loads from the mapping have no capability, and
-   pointer stores into the mapping panic. Compile every file that loads or stores pointers in a
-   marked mapping with -fzmark-shared.
+   pointer stores into the mapping panic. So can small inlined copies (memcpy, memmove, struct
+   assignment) into the mapping, even of plain data, when a source word still carries a stale
+   capability. Compile every file, including libraries, that loads, stores or copies into a marked
+   mapping with -fzmark-shared.
 
    The mapping must start at ptr, come from mmap with MAP_SHARED or from shmat, and have had no
    pointer stored into it yet; anything else panics. Marking an already marked mapping does
