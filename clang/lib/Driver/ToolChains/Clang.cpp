@@ -7814,6 +7814,10 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     }
   }
 
+  // Fil-C: -fzmark-shared marks every emitted function with "filc-zmark-shared", which
+  // FilPizlonator reads per function, so it survives LTO and inlining.
+  Args.addOptInFlag(CmdArgs, options::OPT_fzmark_shared, options::OPT_fno_zmark_shared);
+
   if (Args.hasArg(options::OPT_yolo_assembler)) {
     // Tell the FilPizlonator pass to recognize the zunsafe_call, zunsafe_fast_call, and
     // zunsafe_buf_call intrinsics. This mirrors ToolChain::SelectTool, where

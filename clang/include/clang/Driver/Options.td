@@ -870,6 +870,13 @@ def enable_filc_jit : Flag<["-"], "enable-filc-jit">, Flags<[NoXarchOption]>,
 def filc_enable_jit : Flag<["--"], "filc-enable-jit">, Flags<[NoXarchOption]>,
   Visibility<[ClangOption]>,
   HelpText<"Alias for -enable-filc-jit">;
+defm zmark_shared : BoolFOption<"zmark-shared",
+  CodeGenOpts<"ZmarkShared">, DefaultFalse,
+  PosFlag<SetTrue, [], [ClangOption, CC1Option],
+          "Fil-C: emit code that honors zmark_shared mappings, so pointers stored in a marked "
+          "MAP_SHARED or shmat mapping are usable by every process. Code compiled without it "
+          "fails safe on a marked mapping">,
+  NegFlag<SetFalse, [], [ClangOption], "Do not emit zmark_shared support (the default)">>;
 def yolo_assembler : Flag<["-"], "yolo-assembler">, Flags<[NoXarchOption]>,
   Visibility<[ClangOption]>,
   HelpText<"Use the built-in YOLO assembler for .s inputs instead of sarcasm, and recognize the zunsafe_* unsafe call intrinsics">;

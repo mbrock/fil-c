@@ -231,6 +231,11 @@ filc_bool zhasvalidcap(void* ptr);
      capability from a pointer once stored in the same word.
    - va_arg from a va_list kept in the mapping gives pointers no capability.
 
+   These rules hold for code compiled with -fzmark-shared. Code compiled without it is unchanged
+   and fails safe on a marked mapping: pointers it loads from the mapping have no capability, and
+   pointer stores into the mapping panic. Compile every file that loads or stores pointers in a
+   marked mapping with -fzmark-shared.
+
    The mapping must start at ptr, come from mmap with MAP_SHARED or from shmat, and have had no
    pointer stored into it yet; anything else panics. Marking an already marked mapping does
    nothing. The mark is inherited across fork, so mark before forking. munmap of the whole mapping

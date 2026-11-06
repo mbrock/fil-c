@@ -1913,6 +1913,9 @@ static void getTrivialDefaultFunctionAttributes(
     if (!CodeGenOpts.TrapFuncName.empty())
       FuncAttrs.addAttribute("trap-func-name", CodeGenOpts.TrapFuncName);
   } else {
+    // Fil-C: FilPizlonator emits zmark_shared support in functions with this attribute.
+    if (CodeGenOpts.ZmarkShared)
+      FuncAttrs.addAttribute("filc-zmark-shared");
     switch (CodeGenOpts.getFramePointer()) {
     case CodeGenOptions::FramePointerKind::None:
       // This is the default behavior.

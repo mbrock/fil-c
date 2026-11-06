@@ -74,10 +74,15 @@ static cl::opt<bool> shareDerivedLowers(
 static cl::opt<bool> propagateChecksBackward(
   "filc-propagate-checks-backward", cl::desc("Perform backward propagation of checks"),
   cl::Hidden, cl::init(true));
+// clang -fzmark-shared marks every function it emits with this attribute; -mllvm
+// -filc-zmark-shared applies to all functions. The attribute travels with the function into
+// LTO and through inlining (the inlined body is lowered as part of the caller).
+static constexpr const char* ZmarkSharedAttr = "filc-zmark-shared";
 static cl::opt<bool> zmarkShared(
   "filc-zmark-shared",
   cl::desc("Emit the inline paths that honor zmark_shared objects (pointer loads, stores and small "
-           "copies). Without it the code is unchanged and fails safe on a marked object"),
+           "copies) in every function, as if each had the filc-zmark-shared attribute. Without "
+           "it, functions without the attribute are unchanged and fail safe on a marked object"),
   cl::Hidden, cl::init(false));
 static cl::opt<bool> yoloAssembler(
   "yolo-assembler",
@@ -1562,6 +1567,11 @@ class Pizlonator {
   FunctionCallee StorePtrAtomicOutline;
   FunctionCallee LoadPtrAtomicOutline;
   FunctionCallee ObjectEnsureAuxPtrOutline;
+  // Declared on first use, so modules without zmark_shared code do not mention it.
+  FunctionCallee ObjectEnsureAuxPtrOrSharedOutline() {
+    return M.getOrInsertFunction(
+      "filc_object_ensure_aux_ptr_or_shared_outline", RawPtrTy, RawPtrTy, RawPtrTy);
+  }
   FunctionCallee ThreadEnsureCCOutlineBufferSlow;
   FunctionCallee StrongCasPtr;
   FunctionCallee XchgPtr;
@@ -1684,6 +1694,10 @@ class Pizlonator {
   std::string FunctionName;
   Function* OldF { nullptr };
   Function* NewF { nullptr };
+
+  // Whether the function being lowered honors zmark_shared objects. Helpers the pass makes
+  // itself (OldF null) do not, which fails safe.
+  bool ZmarkShared { false };
 
   std::unordered_map<Instruction*, Type*> InstTypes;
   std::unordered_map<Instruction*, std::vector<Type*>> InstTypeVectors;
@@ -2393,7 +2407,7 @@ class Pizlonator {
       NewLowerAsInt->addIncoming(LowerFromBoxLoadInt, ElseTerm->getParent());
       LowerAsInt = NewLowerAsInt;
     }
-    if (zmarkShared && MAD.MK == MemoryKind::Heap && MAD.Lower) {
+    if (ZmarkShared && MAD.MK == MemoryKind::Heap && MAD.Lower) {
       // An object without aux may be zmark_shared. Then the loaded address gets the object's own
       // capability, or none when it is null, computed without a call: the flags are in the aux
       // word. The address is loaded once on each edge into the join and the null test uses the
@@ -2491,7 +2505,7 @@ class Pizlonator {
       return;
     }
     
-    if (zmarkShared && MAD.MK == MemoryKind::Heap && MAD.Lower) {
+    if (ZmarkShared && MAD.MK == MemoryKind::Heap && MAD.Lower) {
       // EnsureAuxPtr leaves the aux base null only for a zmark_shared object. The runtime checks
       // that the pointer is null or into that object and stores its address only.
       Instruction* AuxIsNull = new ICmpInst(
@@ -4261,7 +4275,7 @@ class Pizlonator {
           // FIXME: Is this the right origin? I think it is, because we aren't hoisting these.
           storeOrigin(getOrigin(Inst->getDebugLoc()), ThenTerm);
           Instruction* CreatedAuxBase = CallInst::Create(
-            ObjectEnsureAuxPtrOutline,
+            ZmarkShared ? ObjectEnsureAuxPtrOrSharedOutline() : ObjectEnsureAuxPtrOutline,
             { MyThread, objectForLower(flightPtrLower(FlightPtr, ThenTerm), ThenTerm) },
             "filc_object_ensure_aux_ptr_outline", ThenTerm);
           CreatedAuxBase->setDebugLoc(Inst->getDebugLoc());
@@ -7984,7 +7998,7 @@ class Pizlonator {
       // copy below goes in InlineB; the test is put in front of it once it is emitted.
       BasicBlock* SharedTestB = nullptr;
       BasicBlock* InlineB = nullptr;
-      if (zmarkShared
+      if (ZmarkShared
           && (DstFMAD.MAD.MK == MemoryKind::Heap || SrcFMAD.MAD.MK == MemoryKind::Heap)) {
         SharedTestB = I->getParent();
         InlineB = SplitBlock(SharedTestB, I);
@@ -14230,6 +14244,8 @@ class Pizlonator {
 
     Value* OldMyThread = MyThread;
     Function* OldOldF = OldF;
+    bool OldZmarkShared = ZmarkShared;
+    ZmarkShared = false;
     Function* OldNewF = NewF;
     MyThread = Result->getArg(0);
     OldF = nullptr;
@@ -14245,6 +14261,7 @@ class Pizlonator {
     
     MyThread = OldMyThread;
     OldF = OldOldF;
+    ZmarkShared = OldZmarkShared;
     NewF = OldNewF;
     
     CallerEntrypointThunks[Signature] = Result;
@@ -14273,6 +14290,8 @@ class Pizlonator {
 
     Value* OldMyThread = MyThread;
     Function* OldOldF = OldF;
+    bool OldZmarkShared = ZmarkShared;
+    ZmarkShared = false;
     Function* OldNewF = NewF;
     MyThread = Result->getArg(0);
     OldF = nullptr;
@@ -14322,6 +14341,7 @@ class Pizlonator {
     
     MyThread = OldMyThread;
     OldF = OldOldF;
+    ZmarkShared = OldZmarkShared;
     NewF = OldNewF;
     
     CalleeEntrypointThunks[Signature] = Result;
@@ -14434,6 +14454,8 @@ class Pizlonator {
       
       Value* OldMyThread = MyThread;
       Function* OldOldF = OldF;
+      bool OldZmarkShared = ZmarkShared;
+      ZmarkShared = false;
       Function* OldNewF = NewF;
       MyThread = Result->getArg(0);
       OldF = nullptr;
@@ -14472,6 +14494,7 @@ class Pizlonator {
     
       MyThread = OldMyThread;
       OldF = OldOldF;
+      ZmarkShared = OldZmarkShared;
       NewF = OldNewF;
     }
     
@@ -16989,10 +17012,9 @@ public:
       "filc_store_ptr_atomic_outline", VoidTy, RawPtrTy, FlightPtrTy, FlightPtrTy);
     LoadPtrAtomicOutline = M.getOrInsertFunction(
       "filc_load_ptr_atomic_with_manual_tracking_outline", FlightPtrTy, FlightPtrTy);
-    // Without -filc-zmark-shared, ensure-aux panics on a marked object, so stores fail safe.
+    // Without zmark_shared support, ensure-aux panics on a marked object, so stores fail safe.
     ObjectEnsureAuxPtrOutline = M.getOrInsertFunction(
-      zmarkShared ? "filc_object_ensure_aux_ptr_or_shared_outline"
-                  : "filc_object_ensure_aux_ptr_outline", RawPtrTy, RawPtrTy, RawPtrTy);
+      "filc_object_ensure_aux_ptr_outline", RawPtrTy, RawPtrTy, RawPtrTy);
     ThreadEnsureCCOutlineBufferSlow = M.getOrInsertFunction(
       "filc_thread_ensure_cc_outline_buffer_slow", VoidTy, RawPtrTy, IntPtrTy);
     StrongCasPtr = M.getOrInsertFunction(
@@ -17730,7 +17752,9 @@ public:
         FunctionName = getFunctionName(F);
         OldF = F;
         NewF = FunctionToHiddenFunction[F];
+        ZmarkShared = zmarkShared || OldF->hasFnAttribute(ZmarkSharedAttr);
         AttrBuilder AB(C, OldF->getAttributes().getFnAttrs());
+        AB.removeAttribute(ZmarkSharedAttr);
         AB.removeAttribute(Attribute::AllocKind);
         AB.removeAttribute(Attribute::AllocSize);
         AB.removeAttribute(Attribute::AlwaysInline);
@@ -18096,6 +18120,7 @@ public:
       FunctionName = "<internal>";
       OldF = nullptr;
       NewF = nullptr;
+      ZmarkShared = false;
     }
     for (GlobalAlias* G : Aliases) {
       assert(!G->isDeclaration());
