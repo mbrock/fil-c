@@ -74,6 +74,11 @@ static cl::opt<bool> shareDerivedLowers(
 static cl::opt<bool> propagateChecksBackward(
   "filc-propagate-checks-backward", cl::desc("Perform backward propagation of checks"),
   cl::Hidden, cl::init(true));
+static cl::opt<bool> zmarkShared(
+  "filc-zmark-shared",
+  cl::desc("Emit the inline paths that honor zmark_shared objects (pointer loads, stores and small "
+           "copies). Without it the code is unchanged and fails safe on a marked object"),
+  cl::Hidden, cl::init(false));
 static cl::opt<bool> yoloAssembler(
   "yolo-assembler",
   cl::desc("Recognize the zunsafe_call, zunsafe_fast_call, and zunsafe_buf_call intrinsics"),
@@ -2388,7 +2393,7 @@ class Pizlonator {
       NewLowerAsInt->addIncoming(LowerFromBoxLoadInt, ElseTerm->getParent());
       LowerAsInt = NewLowerAsInt;
     }
-    if (MAD.MK == MemoryKind::Heap && MAD.Lower) {
+    if (zmarkShared && MAD.MK == MemoryKind::Heap && MAD.Lower) {
       // An object without aux may be zmark_shared. Then the loaded address gets the object's own
       // capability, or none when it is null, computed without a call: the flags are in the aux
       // word. The address is loaded once on each edge into the join and the null test uses the
@@ -2486,7 +2491,7 @@ class Pizlonator {
       return;
     }
     
-    if (MAD.MK == MemoryKind::Heap && MAD.Lower) {
+    if (zmarkShared && MAD.MK == MemoryKind::Heap && MAD.Lower) {
       // EnsureAuxPtr leaves the aux base null only for a zmark_shared object. The runtime checks
       // that the pointer is null or into that object and stores its address only.
       Instruction* AuxIsNull = new ICmpInst(
@@ -4258,7 +4263,7 @@ class Pizlonator {
           Instruction* CreatedAuxBase = CallInst::Create(
             ObjectEnsureAuxPtrOutline,
             { MyThread, objectForLower(flightPtrLower(FlightPtr, ThenTerm), ThenTerm) },
-            "filc_object_ensure_aux_ptr_or_shared_outline", ThenTerm);
+            "filc_object_ensure_aux_ptr_outline", ThenTerm);
           CreatedAuxBase->setDebugLoc(Inst->getDebugLoc());
           (new StoreInst(CreatedAuxBase, AuxBaseVar, ThenTerm))->setDebugLoc(Inst->getDebugLoc());
           break;
@@ -7979,7 +7984,8 @@ class Pizlonator {
       // copy below goes in InlineB; the test is put in front of it once it is emitted.
       BasicBlock* SharedTestB = nullptr;
       BasicBlock* InlineB = nullptr;
-      if (DstFMAD.MAD.MK == MemoryKind::Heap || SrcFMAD.MAD.MK == MemoryKind::Heap) {
+      if (zmarkShared
+          && (DstFMAD.MAD.MK == MemoryKind::Heap || SrcFMAD.MAD.MK == MemoryKind::Heap)) {
         SharedTestB = I->getParent();
         InlineB = SplitBlock(SharedTestB, I);
       }
@@ -16983,8 +16989,10 @@ public:
       "filc_store_ptr_atomic_outline", VoidTy, RawPtrTy, FlightPtrTy, FlightPtrTy);
     LoadPtrAtomicOutline = M.getOrInsertFunction(
       "filc_load_ptr_atomic_with_manual_tracking_outline", FlightPtrTy, FlightPtrTy);
+    // Without -filc-zmark-shared, ensure-aux panics on a marked object, so stores fail safe.
     ObjectEnsureAuxPtrOutline = M.getOrInsertFunction(
-      "filc_object_ensure_aux_ptr_or_shared_outline", RawPtrTy, RawPtrTy, RawPtrTy);
+      zmarkShared ? "filc_object_ensure_aux_ptr_or_shared_outline"
+                  : "filc_object_ensure_aux_ptr_outline", RawPtrTy, RawPtrTy, RawPtrTy);
     ThreadEnsureCCOutlineBufferSlow = M.getOrInsertFunction(
       "filc_thread_ensure_cc_outline_buffer_slow", VoidTy, RawPtrTy, IntPtrTy);
     StrongCasPtr = M.getOrInsertFunction(
